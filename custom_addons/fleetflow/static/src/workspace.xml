@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<templates xml:space="preserve">
+    <t t-name="fleetflow.Workspace" owl="1">
+        <div class="ff_workspace" t-att-aria-busy="state.loading ? 'true' : 'false'">
+            <aside class="ff_sidebar">
+                <a href="#ff_main" class="ff_skip">Skip to workspace</a>
+                <div class="ff_brand"><span class="ff_brand_mark" aria-hidden="true"><i class="fa fa-road"/></span><span>FleetFlow<small>OPERATIONS WORKSPACE</small></span></div>
+                <nav aria-label="FleetFlow navigation">
+                    <span class="ff_nav_label">WORKSPACE</span>
+                    <button class="ff_nav_item is_active" aria-current="page" t-on-click="load"><i class="fa fa-th-large" aria-hidden="true"/> Overview</button>
+                    <button class="ff_nav_item" t-on-click="() => this.openAction('fleetflow.action_orders')"><i class="fa fa-columns" aria-hidden="true"/> Work orders</button>
+                    <button class="ff_nav_item" t-on-click="() => this.openAction('fleetflow.action_my_queue')"><i class="fa fa-check-square-o" aria-hidden="true"/> My queue</button>
+                    <button class="ff_nav_item" t-on-click="() => this.openAction('fleetflow.action_schedule')"><i class="fa fa-calendar-o" aria-hidden="true"/> Schedule</button>
+                    <button class="ff_nav_item" t-on-click="() => this.openAction('fleetflow.action_vehicles')"><i class="fa fa-car" aria-hidden="true"/> Vehicle register</button>
+                    <button t-if="state.data and state.data.can_create" class="ff_nav_item" t-on-click="() => this.openAction('fleetflow.action_reports')"><i class="fa fa-bar-chart" aria-hidden="true"/> Reports</button>
+                </nav>
+                <div class="ff_sidebar_note"><span class="ff_online_dot"/> One workflow.<br/>Every handover accounted for.<small>Intake → Repair → Release</small></div>
+            </aside>
+            <main class="ff_main" id="ff_main" tabindex="-1">
+                <header class="ff_topbar"><span>Operations <span class="ff_slash">/</span> <strong>Overview</strong></span><button class="ff_refresh" t-on-click="load" t-att-disabled="state.loading"><i class="fa fa-refresh" aria-hidden="true"/> Refresh</button></header>
+                <section class="ff_hero">
+                    <div><span class="ff_eyebrow">YOUR FLEET. IN FLOW.</span><h1>Keep your fleet moving.</h1><p>Know what needs attention. Make the next handover clear.</p></div>
+                    <button t-if="state.data and state.data.can_create" class="ff_button ff_button_primary" t-on-click="newOrder"><i class="fa fa-plus" aria-hidden="true"/> New work order</button>
+                </section>
+                <div t-if="state.loading" class="ff_loading" role="status"><i class="fa fa-circle-o-notch fa-spin" aria-hidden="true"/><span>Loading your workspace…</span></div>
+                <div t-elif="state.error" class="ff_empty" role="alert"><i class="fa fa-exclamation-circle" aria-hidden="true"/><h2>We could not load your workspace.</h2><p>Your work has not been changed. Check your connection and try again.</p><button class="ff_button ff_button_primary" t-on-click="load">Try again</button></div>
+                <t t-elif="state.data">
+                    <section class="ff_metrics" aria-label="Work order metrics">
+                        <button class="ff_metric" t-on-click="() => this.openOrders('open')"><span>Open work orders<i class="fa fa-arrow-up" aria-hidden="true"/></span><strong t-esc="state.data.open"/><small>Across active workflow stages</small></button>
+                        <button class="ff_metric" t-on-click="() => this.openOrders('intake')"><span>Awaiting approval<i class="fa fa-clock-o" aria-hidden="true"/></span><strong t-esc="state.data.approval"/><small>Scope and dispatch to confirm</small></button>
+                        <button class="ff_metric ff_metric_alert" t-on-click="() => this.openOrders('overdue')"><span>Past target<i class="fa fa-flag-o" aria-hidden="true"/></span><strong t-esc="state.data.overdue"/><small>Open orders needing attention</small></button>
+                        <button class="ff_metric" t-on-click="() => this.openOrders('released')"><span>Recently released<i class="fa fa-check-circle-o" aria-hidden="true"/></span><strong t-esc="state.data.released"/><small>Release decisions in the last 7 days</small></button>
+                    </section>
+                    <div class="ff_content_grid">
+                        <section class="ff_panel ff_attention">
+                            <header class="ff_panel_header"><div><span class="ff_eyebrow">FOCUS QUEUE</span><h2>Next up</h2><p>Highest priority first, then earliest target.</p></div><button class="ff_text_button" t-on-click="() => this.openOrders('open')">View all <i class="fa fa-arrow-right" aria-hidden="true"/></button></header>
+                            <div t-if="!state.data.orders.length" class="ff_empty"><span class="ff_empty_icon"><i class="fa fa-check" aria-hidden="true"/></span><h3>No open work orders.</h3><p t-if="state.data.can_create">Start with a vehicle issue. We will keep the handovers together.</p><p t-else="">Your assigned queue is clear. New assignments will appear here.</p><button t-if="state.data.can_create" class="ff_button ff_button_secondary" t-on-click="newOrder">Create the first order</button></div>
+                            <div t-else="" class="ff_table_scroll" tabindex="0" role="region" aria-label="Priority work orders">
+                                <table class="ff_table"><caption class="ff_visually_hidden">Up to eight open work orders, ordered by priority and target completion</caption><thead><tr><th scope="col">WORK ORDER</th><th scope="col">STAGE</th><th scope="col">TARGET</th><th scope="col">OWNER</th></tr></thead><tbody>
+                                    <tr t-foreach="state.data.orders" t-as="order" t-key="order.id">
+                                        <td><button class="ff_order_link" t-on-click="() => this.openOrder(order.id)"><small t-esc="order.name"/><strong t-esc="order.title"/></button><span class="ff_vehicle_name" t-esc="order.vehicle_id[1]"/><span t-if="order.priority === '3'" class="ff_critical">Critical</span></td>
+                                        <td><span t-att-class="'ff_stage ff_stage_' + order.stage" t-esc="stageLabels[order.stage]"/></td>
+                                        <td><span t-att-class="order.overdue ? 'ff_late' : ''" t-esc="deadline(order.due_at)"/><small t-if="order.overdue" class="ff_late">Past target</small></td>
+                                        <td><span t-if="order.assignee_id" t-esc="order.assignee_id[1]"/><span t-else="" class="ff_unassigned">Unassigned</span></td>
+                                    </tr>
+                                </tbody></table>
+                            </div>
+                            <footer class="ff_panel_footer">Only work orders you are allowed to access are shown.</footer>
+                        </section>
+                        <div class="ff_side_panels">
+                            <section class="ff_panel ff_flow_panel"><header class="ff_panel_header"><div><span class="ff_eyebrow">FROM REQUEST TO RELEASE</span><h2>Workflow pulse</h2></div></header><div class="ff_pipeline">
+                                <button t-foreach="state.data.stages" t-as="stage" t-key="stage.key" class="ff_pipeline_row" t-on-click="() => this.openOrders(stage.key)"><span class="ff_pipeline_label"><span t-esc="stage.label"/><strong t-esc="stage.count"/></span><span class="ff_track" aria-hidden="true"><span t-att-class="'ff_track_fill ff_fill_' + stage.key" t-att-style="'width:' + stageWidth(stage.count)"/></span></button>
+                            </div></section>
+                            <section class="ff_handover"><span class="ff_eyebrow">BUILT-IN CHECKPOINT</span><h2>Clear evidence.<br/>Confident handovers.</h2><p>Repair notes and inspection checks come before a manager records release.</p><button class="ff_text_button" t-on-click="() => this.openOrders('quality')">Open release review <i class="fa fa-arrow-right" aria-hidden="true"/></button></section>
+                        </div>
+                    </div>
+                    <footer class="ff_workspace_footer">FleetFlow <span>•</span> Fleet maintenance, without the scattered handovers.</footer>
+                </t>
+            </main>
+        </div>
+    </t>
+</templates>

@@ -1,0 +1,19 @@
+name: FleetFlow checks
+on:
+  push:
+    paths: ["custom_addons/fleetflow/**", "fleetflow/**", ".github/workflows/fleetflow.yml"]
+  pull_request:
+    paths: ["custom_addons/fleetflow/**", "fleetflow/**", ".github/workflows/fleetflow.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Structural checks
+        run: python3 fleetflow/check_static.py
+      - name: Odoo install and integration tests in isolated containers
+        run: python3 fleetflow/manage.py test

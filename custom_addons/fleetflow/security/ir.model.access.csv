@@ -1,0 +1,10 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_order_technician,FleetFlow technician,model_fleetflow_order,group_technician,1,1,0,0
+access_order_dispatcher,FleetFlow dispatcher,model_fleetflow_order,group_dispatcher,1,1,1,0
+access_order_manager,FleetFlow manager,model_fleetflow_order,group_manager,1,1,1,1
+access_vehicle_technician,FleetFlow vehicle reader,fleet.model_fleet_vehicle,group_technician,1,0,0,0
+access_vehicle_dispatcher,FleetFlow vehicle editor,fleet.model_fleet_vehicle,group_dispatcher,1,1,1,0
+access_model_technician,FleetFlow model reader,fleet.model_fleet_vehicle_model,group_technician,1,0,0,0
+access_model_dispatcher,FleetFlow model editor,fleet.model_fleet_vehicle_model,group_dispatcher,1,1,1,0
+access_brand_technician,FleetFlow brand reader,fleet.model_fleet_vehicle_model_brand,group_technician,1,0,0,0
+access_brand_dispatcher,FleetFlow brand editor,fleet.model_fleet_vehicle_model_brand,group_dispatcher,1,1,1,0

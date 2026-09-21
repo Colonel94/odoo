@@ -1,0 +1,132 @@
+<?xml version='1.0' encoding='utf-8'?>
+<odoo>
+    <record id="order_search" model="ir.ui.view">
+        <field name="name">fleetflow.order.search</field><field name="model">fleetflow.order</field>
+        <field name="arch" type="xml">
+            <search string="Find work orders">
+                <field name="name" filter_domain="['|', ('name', 'ilike', self), ('title', 'ilike', self)]"/>
+                <field name="vehicle_id"/><field name="assignee_id"/>
+                <filter name="open" string="Open work" domain="[('stage', 'not in', ['done', 'cancelled'])]"/>
+                <filter name="mine" string="Assigned to me" domain="[('assignee_id', '=', uid)]"/>
+                <filter name="critical" string="Critical" domain="[('priority', '=', '3')]"/>
+                <separator/>
+                <filter name="stage" string="Stage" context="{'group_by': 'stage'}"/>
+                <filter name="technician" string="Technician" context="{'group_by': 'assignee_id'}"/>
+                <filter name="vehicle" string="Vehicle" context="{'group_by': 'vehicle_id'}"/>
+                <filter name="company" string="Company" context="{'group_by': 'company_id'}" groups="base.group_multi_company"/>
+            </search>
+        </field>
+    </record>
+    <record id="order_kanban" model="ir.ui.view">
+        <field name="name">fleetflow.order.kanban</field><field name="model">fleetflow.order</field>
+        <field name="arch" type="xml">
+            <kanban default_group_by="stage" class="ff_order_kanban" records_draggable="false" quick_create="false" group_create="false" group_delete="false" group_edit="false">
+                <field name="name"/><field name="title"/><field name="vehicle_id"/><field name="stage"/>
+                <field name="priority"/><field name="due_at"/><field name="assignee_id"/><field name="is_overdue"/>
+                <templates><t t-name="kanban-box">
+                    <div class="oe_kanban_global_click ff_job_card">
+                        <div class="ff_card_top"><field name="name"/><field name="priority" widget="priority"/></div>
+                        <strong class="ff_card_title"><field name="title"/></strong>
+                        <div class="ff_card_vehicle"><i class="fa fa-car" aria-hidden="true"/> <field name="vehicle_id"/></div>
+                        <div class="ff_card_due" t-att-class="record.is_overdue.raw_value ? 'ff_late' : ''"><i class="fa fa-clock-o" aria-hidden="true"/> <field name="due_at"/></div>
+                        <div class="ff_card_footer"><field name="assignee_id" widget="many2one_avatar_user"/><span t-if="!record.assignee_id.raw_value">Unassigned</span><i class="fa fa-arrow-right" aria-hidden="true"/></div>
+                    </div>
+                </t></templates>
+            </kanban>
+        </field>
+    </record>
+    <record id="order_tree" model="ir.ui.view">
+        <field name="name">fleetflow.order.tree</field><field name="model">fleetflow.order</field>
+        <field name="arch" type="xml">
+            <tree decoration-danger="is_overdue" decoration-muted="stage == 'cancelled'">
+                <field name="is_overdue" invisible="1"/><field name="name"/><field name="title"/><field name="vehicle_id"/>
+                <field name="priority" widget="priority"/><field name="assignee_id" widget="many2one_avatar_user"/>
+                <field name="due_at"/><field name="stage" widget="badge"/><field name="company_id" groups="base.group_multi_company"/>
+            </tree>
+        </field>
+    </record>
+    <record id="order_form" model="ir.ui.view">
+        <field name="name">fleetflow.order.form</field><field name="model">fleetflow.order</field>
+        <field name="arch" type="xml">
+            <form string="Work order" class="ff_order_form" duplicate="false">
+                <header>
+                    <button name="action_approve" type="object" string="Approve and schedule" class="oe_highlight" groups="fleetflow.group_manager" attrs="{'invisible': [('stage', '!=', 'intake')]}" confirm="Approve this scope, estimate and technician assignment?"/>
+                    <button name="action_start" type="object" string="Start work" class="oe_highlight" attrs="{'invisible': [('stage', '!=', 'approved')]}"/>
+                    <button name="action_submit_review" type="object" string="Request release" class="oe_highlight" attrs="{'invisible': [('stage', '!=', 'in_progress')]}"/>
+                    <button name="action_release" type="object" string="Record release" class="oe_highlight" groups="fleetflow.group_manager" attrs="{'invisible': [('stage', '!=', 'quality')]}" confirm="Record your release decision? Independently verify the vehicle. This software does not certify roadworthiness."/>
+                    <button name="action_rework" type="object" string="Return for rework" groups="fleetflow.group_manager" attrs="{'invisible': [('stage', '!=', 'quality')]}"/>
+                    <button name="action_cancel" type="object" string="Cancel order" groups="fleetflow.group_manager" attrs="{'invisible': [('stage', 'in', ['done', 'cancelled'])]}" confirm="Cancel this work order? Its history will be retained."/>
+                    <field name="stage" widget="statusbar" statusbar_visible="intake,approved,in_progress,quality,done"/>
+                </header>
+                <field name="can_plan" invisible="1"/><field name="id" invisible="1"/><sheet>
+                    <div class="oe_title"><span class="ff_eyebrow">FLEETFLOW / WORK ORDER</span><h2><field name="name"/></h2><h1><field name="title" placeholder="What needs attention?" attrs="{'readonly': ['|', ('can_plan', '=', False), ('stage', '!=', 'intake')]}"/></h1></div>
+                    <group>
+                        <group string="Vehicle and scope">
+                            <field name="vehicle_id" attrs="{'readonly': ['|', ('can_plan', '=', False), ('stage', '!=', 'intake')]}" domain="[('company_id', '=', company_id), ('active', '=', True)]"/>
+                            <field name="service_kind" attrs="{'readonly': ['|', ('can_plan', '=', False), ('stage', '!=', 'intake')]}"/>
+                            <field name="priority" widget="priority" attrs="{'readonly': ['|', ('can_plan', '=', False), ('stage', '!=', 'intake')]}"/>
+                            <field name="company_id" groups="base.group_multi_company" attrs="{'readonly': [('id', '!=', False)]}"/>
+                            <field name="company_id" invisible="1"/><field name="currency_id" invisible="1"/>
+                        </group>
+                        <group string="Dispatch">
+                            <field name="assignee_id" attrs="{'readonly': ['|', ('can_plan', '=', False), ('stage', 'not in', ['intake', 'approved'])]}"/>
+                            <field name="scheduled_at" attrs="{'readonly': ['|', ('can_plan', '=', False), ('stage', 'not in', ['intake', 'approved'])]}"/>
+                            <field name="due_at" attrs="{'readonly': ['|', ('can_plan', '=', False), ('stage', 'not in', ['intake', 'approved'])]}"/>
+                            <field name="estimated_cost" attrs="{'readonly': ['|', ('can_plan', '=', False), ('stage', '!=', 'intake')]}"/>
+                            <field name="estimate_notes" placeholder="Work covered, parts expected, or why no cost is expected" attrs="{'readonly': ['|', ('can_plan', '=', False), ('stage', '!=', 'intake')]}"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Request"><field name="description" placeholder="Symptoms, location and useful context. Add supporting files in the conversation below." attrs="{'readonly': ['|', ('can_plan', '=', False), ('stage', '!=', 'intake')]}"/></page>
+                        <page string="Repair and inspection">
+                            <group><group string="Repair evidence">
+                                <field name="diagnosis" placeholder="What caused the issue?" attrs="{'readonly': [('stage', '!=', 'in_progress')]}"/>
+                                <field name="repair_notes" placeholder="Work completed and parts used" attrs="{'readonly': [('stage', '!=', 'in_progress')]}"/>
+                                <field name="actual_cost" attrs="{'readonly': [('stage', '!=', 'in_progress')]}"/>
+                            </group><group string="Required inspection checks">
+                                <field name="check_brakes" attrs="{'readonly': [('stage', '!=', 'in_progress')]}"/>
+                                <field name="check_tyres" attrs="{'readonly': [('stage', '!=', 'in_progress')]}"/>
+                                <field name="check_lights" attrs="{'readonly': [('stage', '!=', 'in_progress')]}"/>
+                                <field name="check_leaks" attrs="{'readonly': [('stage', '!=', 'in_progress')]}"/>
+                                <field name="check_road_test" attrs="{'readonly': [('stage', '!=', 'in_progress')]}"/>
+                            </group></group>
+                            <p class="text-muted">These checks record human inspection. They are not a legal or mechanical certification.</p>
+                        </page>
+                        <page string="Decisions and history">
+                            <group><field name="decision_notes" placeholder="Required before cancellation or return for rework" attrs="{'readonly': [('stage', 'in', ['done', 'cancelled'])]}" groups="fleetflow.group_dispatcher"/></group>
+                            <group><group string="Scope approval"><field name="approved_by"/><field name="approved_at"/></group><group string="Release decision"><field name="released_by"/><field name="released_at"/></group></group>
+                        </page>
+                    </notebook>
+                </sheet>
+                <div class="oe_chatter"><field name="message_follower_ids"/><field name="activity_ids"/><field name="message_ids"/></div>
+            </form>
+        </field>
+    </record>
+    <record id="order_calendar" model="ir.ui.view">
+        <field name="name">fleetflow.order.calendar</field><field name="model">fleetflow.order</field>
+        <field name="arch" type="xml"><calendar string="Work schedule" date_start="scheduled_at" date_stop="due_at" color="assignee_id" mode="week" quick_add="false" create="false"><field name="name"/><field name="title"/><field name="vehicle_id"/><field name="assignee_id"/></calendar></field>
+    </record>
+    <record id="order_graph" model="ir.ui.view">
+        <field name="name">fleetflow.order.graph</field><field name="model">fleetflow.order</field>
+        <field name="arch" type="xml"><graph string="Work volume by stage" type="bar"><field name="stage"/></graph></field>
+    </record>
+    <record id="order_pivot" model="ir.ui.view">
+        <field name="name">fleetflow.order.pivot</field><field name="model">fleetflow.order</field>
+        <field name="arch" type="xml"><pivot string="Work volume"><field name="company_id" type="row"/><field name="service_kind" type="row"/><field name="stage" type="col"/></pivot></field>
+    </record>
+    <record id="action_workspace" model="ir.actions.client"><field name="name">FleetFlow</field><field name="tag">fleetflow.workspace</field></record>
+    <record id="action_orders" model="ir.actions.act_window"><field name="name">Work orders</field><field name="res_model">fleetflow.order</field><field name="view_mode">kanban,tree,form,calendar,graph,pivot</field><field name="context">{'search_default_open': 1}</field><field name="help" type="html"><p class="o_view_nocontent_smiling_face">A clearer path from issue to release.</p><p>Create a work order, describe the issue and plan the next step.</p></field></record>
+    <record id="action_my_queue" model="ir.actions.act_window"><field name="name">My queue</field><field name="res_model">fleetflow.order</field><field name="view_mode">tree,form,kanban</field><field name="domain">[('assignee_id', '=', uid), ('stage', 'not in', ['done', 'cancelled'])]</field></record>
+    <record id="action_schedule" model="ir.actions.act_window"><field name="name">Schedule</field><field name="res_model">fleetflow.order</field><field name="view_mode">calendar,tree,form</field><field name="domain">[('scheduled_at', '!=', False), ('stage', 'not in', ['done', 'cancelled'])]</field></record>
+    <record id="action_reports" model="ir.actions.act_window"><field name="name">Work volume</field><field name="res_model">fleetflow.order</field><field name="view_mode">graph,pivot,tree,form</field></record>
+    <record id="vehicle_tree" model="ir.ui.view"><field name="name">fleetflow.vehicle.tree</field><field name="model">fleet.vehicle</field><field name="arch" type="xml"><tree><field name="license_plate"/><field name="model_id"/><field name="vin_sn"/><field name="location"/><field name="company_id" groups="base.group_multi_company"/></tree></field></record>
+<record id="vehicle_form" model="ir.ui.view"><field name="name">fleetflow.vehicle.form</field><field name="model">fleet.vehicle</field><field name="arch" type="xml"><form string="Vehicle register"><sheet><div class="oe_title"><h1><field name="license_plate" placeholder="Vehicle registration"/></h1></div><group><group><field name="model_id"/><field name="vin_sn"/><field name="location"/></group><group><field name="company_id" groups="base.group_multi_company"/><field name="active"/><field name="color"/></group></group><field name="description"/></sheet><div class="oe_chatter"><field name="message_follower_ids"/><field name="activity_ids"/><field name="message_ids"/></div></form></field></record>
+<record id="action_vehicles" model="ir.actions.act_window"><field name="name">Vehicle register</field><field name="res_model">fleet.vehicle</field><field name="view_mode">tree,form</field></record>
+    <record id="vehicle_action_tree" model="ir.actions.act_window.view"><field name="sequence">1</field><field name="view_mode">tree</field><field name="view_id" ref="vehicle_tree"/><field name="act_window_id" ref="action_vehicles"/></record><record id="vehicle_action_form" model="ir.actions.act_window.view"><field name="sequence">2</field><field name="view_mode">form</field><field name="view_id" ref="vehicle_form"/><field name="act_window_id" ref="action_vehicles"/></record><menuitem id="menu_root" name="FleetFlow" sequence="1" groups="fleetflow.group_technician"/>
+    <menuitem id="menu_workspace" name="Overview" parent="menu_root" action="action_workspace" sequence="1"/>
+    <menuitem id="menu_orders" name="Work orders" parent="menu_root" action="action_orders" sequence="2"/>
+    <menuitem id="menu_my_queue" name="My queue" parent="menu_root" action="action_my_queue" sequence="3"/>
+    <menuitem id="menu_schedule" name="Schedule" parent="menu_root" action="action_schedule" sequence="4"/>
+    <menuitem id="menu_vehicles" name="Vehicles" parent="menu_root" action="action_vehicles" sequence="5"/>
+    <menuitem id="menu_reports" name="Reports" parent="menu_root" action="action_reports" sequence="6" groups="fleetflow.group_dispatcher"/>
+</odoo>

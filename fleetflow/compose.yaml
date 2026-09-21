@@ -1,0 +1,39 @@
+# Local development only. Nothing is published outside localhost.
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: ${FLEETFLOW_POSTGRES_PASSWORD:?Run python fleetflow/manage.py init}
+      FLEETFLOW_DB_PASSWORD: ${FLEETFLOW_DB_PASSWORD:?Missing database password}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/fleetflow.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d fleetflow"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  web:
+    image: odoo:16.0
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["python3", "/workspace/fleetflow/entrypoint.py"]
+    environment:
+      FLEETFLOW_DB_PASSWORD: ${FLEETFLOW_DB_PASSWORD:?Missing database password}
+      FLEETFLOW_MASTER_PASSWORD: ${FLEETFLOW_MASTER_PASSWORD:?Missing master password}
+      FLEETFLOW_ADMIN_PASSWORD: ${FLEETFLOW_ADMIN_PASSWORD:?Missing administrator password}
+    volumes:
+      - ..:/workspace:ro
+      - odoo-data:/var/lib/odoo
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; r = urllib.request.urlopen('http://127.0.0.1:8069/web/login', timeout=5); assert r.status == 200"]
+      interval: 10s
+      timeout: 6s
+      start_period: 30s
+      retries: 12
+    ports:
+      - "127.0.0.1:8069:8069"
+volumes:
+  db-data:
+  odoo-data:
