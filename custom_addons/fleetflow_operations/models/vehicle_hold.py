@@ -41,6 +41,14 @@ class FleetflowVehicleHold(models.Model):
     cleared_by = fields.Many2one("res.users", readonly=True, copy=False)
     cleared_on = fields.Datetime(readonly=True, copy=False)
     clear_note = fields.Text(readonly=True, copy=False)
+    clear_reason_input = fields.Text(string="Clearance note", copy=False,
+                                     help="Reason/evidence; required to clear this hold.")
+
+    def button_clear(self):
+        """Form action: clear this hold using the entered clearance note."""
+        for hold in self:
+            hold.action_clear(note=hold.clear_reason_input)
+        return True
 
     @api.depends("hold_type", "vehicle_id", "state")
     def _compute_name(self):

@@ -64,13 +64,16 @@ def shell_task(config_path, mode):
         elif mode == 'users':
             from seed_users import seed as seed_users
             seed_users(env)
+        elif mode == 'ops':
+            from seed_ops import seed as seed_ops
+            seed_ops(env)
         cursor.commit()
 
 
 def main():
     path = configure()
     args = sys.argv[1:]
-    if args and args[0] in ('bootstrap', 'demo', 'users'):
+    if args and args[0] in ('bootstrap', 'demo', 'users', 'ops'):
         shell_task(path, args[0])
     else:
         # Run the image's Odoo console script (coherent core + bundled addons).

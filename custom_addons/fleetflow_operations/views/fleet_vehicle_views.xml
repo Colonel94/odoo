@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Add an Operations page to the standard fleet vehicle form. -->
+    <record id="fleet_vehicle_form_ops" model="ir.ui.view">
+        <field name="name">fleet.vehicle.form.operations</field>
+        <field name="model">fleet.vehicle</field>
+        <field name="inherit_id" ref="fleet.fleet_vehicle_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet/notebook" position="inside">
+                <page string="Operations" name="ff_operations">
+                    <div class="alert alert-warning" role="status"
+                         attrs="{'invisible': [('ff_operational_state', '=', 'reviewed')]}">
+                        This vehicle is operationally <b>unreviewed</b>. It cannot be allocated until a compliance reviewer confirms it.
+                    </div>
+                    <button name="ff_mark_reviewed" type="object" string="Mark reviewed"
+                            class="btn-primary" groups="fleetflow_operations.group_ops_compliance"
+                            attrs="{'invisible': [('ff_operational_state', '=', 'reviewed')]}"/>
+                    <group>
+                        <group string="Legal context">
+                            <field name="ff_operational_state" widget="badge"
+                                   decoration-success="ff_operational_state == 'reviewed'"
+                                   decoration-warning="ff_operational_state == 'unreviewed'"/>
+                            <field name="ff_operator_company_id"/>
+                            <field name="ff_owner_partner_id"/>
+                            <field name="ff_active_hold_count"/>
+                        </group>
+                        <group string="Age basis (distinct dates)">
+                            <field name="ff_manufacture_date"/>
+                            <field name="ff_manufacture_precision"/>
+                            <field name="ff_first_registration_date"/>
+                            <field name="ff_source_category"/>
+                            <field name="ff_powertrain"/>
+                            <field name="ff_official_category"/>
+                            <field name="ff_authorized_end_of_use"/>
+                        </group>
+                    </group>
+                    <group string="Evidence">
+                        <field name="ff_credential_ids" nolabel="1">
+                            <tree>
+                                <field name="doc_kind"/>
+                                <field name="reference"/>
+                                <field name="date_end"/>
+                                <field name="state" widget="badge"/>
+                            </tree>
+                        </field>
+                    </group>
+                    <group string="Channel enrolments">
+                        <field name="ff_channel_enrolment_ids" nolabel="1">
+                            <tree>
+                                <field name="channel"/>
+                                <field name="product"/>
+                                <field name="state" widget="badge"/>
+                                <field name="verified_as_of"/>
+                            </tree>
+                        </field>
+                    </group>
+                    <group string="Holds">
+                        <field name="ff_hold_ids" nolabel="1">
+                            <tree decoration-danger="state == 'active' and dispatch_blocking">
+                                <field name="hold_type"/>
+                                <field name="reason"/>
+                                <field name="dispatch_blocking"/>
+                                <field name="state" widget="badge"/>
+                            </tree>
+                        </field>
+                    </group>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+    <record id="action_ops_vehicles" model="ir.actions.act_window">
+        <field name="name">Vehicles</field>
+        <field name="res_model">fleet.vehicle</field>
+        <field name="view_mode">tree,form,kanban</field>
+    </record>
+</odoo>

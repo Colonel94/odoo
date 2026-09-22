@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="hold_tree" model="ir.ui.view">
+        <field name="name">fleetflow.vehicle.hold.tree</field>
+        <field name="model">fleetflow.vehicle.hold</field>
+        <field name="arch" type="xml">
+            <tree decoration-danger="state == 'active' and dispatch_blocking"
+                  decoration-muted="state == 'cleared'">
+                <field name="vehicle_id"/>
+                <field name="hold_type"/>
+                <field name="reason"/>
+                <field name="dispatch_blocking"/>
+                <field name="state" widget="badge"/>
+                <field name="create_date"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="hold_form" model="ir.ui.view">
+        <field name="name">fleetflow.vehicle.hold.form</field>
+        <field name="model">fleetflow.vehicle.hold</field>
+        <field name="arch" type="xml">
+            <form string="Vehicle hold">
+                <header>
+                    <button name="button_clear" type="object" string="Clear hold" class="oe_highlight"
+                            groups="fleetflow_operations.group_ops_fleet_manager"
+                            attrs="{'invisible': [('state', '!=', 'active')]}"
+                            confirm="Clear this specific hold? Other holds and expired documents remain."/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="company_id" invisible="1"/>
+                            <field name="vehicle_id"/>
+                            <field name="hold_type"/>
+                            <field name="dispatch_blocking"/>
+                            <field name="source_work_order_id"/>
+                            <field name="reference"/>
+                        </group>
+                        <group>
+                            <field name="created_by" readonly="1"/>
+                            <field name="cleared_by" readonly="1"/>
+                            <field name="cleared_on" readonly="1"/>
+                        </group>
+                    </group>
+                    <field name="reason" placeholder="Why is the vehicle held?"
+                           attrs="{'readonly': [('state', '=', 'cleared')]}"/>
+                    <group string="Clearance" attrs="{'invisible': [('state', '=', 'cleared')]}">
+                        <field name="clear_reason_input" placeholder="Reason/evidence to clear this hold"/>
+                    </group>
+                    <field name="clear_note" readonly="1" attrs="{'invisible': [('state', '!=', 'cleared')]}"/>
+                </sheet>
+                <div class="oe_chatter">
+                    <field name="message_follower_ids"/>
+                    <field name="message_ids"/>
+                </div>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_holds" model="ir.actions.act_window">
+        <field name="name">Holds</field>
+        <field name="res_model">fleetflow.vehicle.hold</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+</odoo>

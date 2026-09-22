@@ -50,13 +50,13 @@ class FleetflowAllocation(models.Model):
     readiness_snapshot = fields.Text(readonly=True, copy=False)
     readiness_version = fields.Char(readonly=True, copy=False)
 
-    # Checkout / return records.
-    checkout_odometer = fields.Float(readonly=True, copy=False)
-    return_odometer = fields.Float(readonly=True, copy=False)
+    # Checkout / return records (captured in-form, consumed by the actions).
+    checkout_odometer = fields.Float(copy=False)
+    return_odometer = fields.Float(copy=False)
     odometer_unit = fields.Selection([("km", "km"), ("mi", "mi")], default="km")
-    return_fuel = fields.Char(readonly=True, copy=False)
-    return_condition = fields.Text(readonly=True, copy=False)
-    return_defect = fields.Boolean(readonly=True, copy=False)
+    return_fuel = fields.Char(copy=False)
+    return_condition = fields.Text(copy=False)
+    return_defect = fields.Boolean(copy=False)
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -185,22 +185,28 @@ class FleetflowAllocation(models.Model):
             raise UserError(_("Cannot check out: resource busy or not returned (%s).")
                             % ", ".join(conflicts.mapped("name")))
         vals = {"state": "checked_out", "custody_out_at": fields.Datetime.now()}
-        if odometer is not None:
+        odometer = self.checkout_odometer if odometer is None else odometer
+        if odometer:
             self._validate_odometer(odometer)
             vals["checkout_odometer"] = odometer
         self.write(vals)
         self.message_post(body=_("Checked out."))
         return True
 
-    def action_return(self, odometer=None, fuel=None, condition=None, defect=False):
+    def action_return(self, odometer=None, fuel=None, condition=None, defect=None):
         self.ensure_one()
         self._require_dispatcher()
         if self.state != "checked_out":
             raise UserError(_("Only a checked-out allocation can be returned."))
         self._lock_resources()
+        # Fall back to the in-form values when called from a button.
+        odometer = self.return_odometer if odometer is None else odometer
+        fuel = self.return_fuel if fuel is None else fuel
+        condition = self.return_condition if condition is None else condition
+        defect = self.return_defect if defect is None else bool(defect)
         vals = {"state": "returned", "custody_in_at": fields.Datetime.now(),
-                "return_fuel": fuel, "return_condition": condition, "return_defect": bool(defect)}
-        if odometer is not None:
+                "return_fuel": fuel, "return_condition": condition, "return_defect": defect}
+        if odometer:
             self._validate_odometer(odometer, is_return=True)
             vals["return_odometer"] = odometer
         self.write(vals)
@@ -216,6 +222,24 @@ class FleetflowAllocation(models.Model):
             raise UserError(_("Only a draft or confirmed allocation can be cancelled (not after checkout)."))
         self.write({"state": "cancelled"})
         return True
+
+    def action_check_readiness(self):
+        """Explain readiness before confirming: a notification with the verdict
+        and the precise next actions, so a blocker is never an unexplained dot."""
+        self.ensure_one()
+        result = self._evaluate()
+        lines = ["%s — %s" % (r["status"].upper(), r["message"]) for r in result["reasons"]]
+        kind = {constants.READY: "success", constants.WARNING: "warning"}.get(result["status"], "danger")
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Readiness: %s") % dict(constants.READINESS_STATES)[result["status"]],
+                "message": "\n".join(lines) or _("All checks pass."),
+                "sticky": True,
+                "type": kind,
+            },
+        }
 
     def _validate_odometer(self, value, is_return=False):
         self.ensure_one()

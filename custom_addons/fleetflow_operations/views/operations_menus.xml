@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Operations navigation. A dedicated app section for the operations
+         personas (dispatcher/compliance/driver/fleet manager); the maintenance
+         Owl workspace remains the single dashboard, not duplicated here. -->
+    <menuitem id="menu_ops_root" name="FleetFlow Ops" sequence="2"
+              web_icon="fleet,static/description/icon.png"
+              groups="fleetflow_operations.group_ops_driver,fleetflow_operations.group_ops_dispatcher,fleetflow_operations.group_ops_compliance,fleetflow_operations.group_ops_fleet_manager"/>
+
+    <menuitem id="menu_ops_today" name="Today" parent="menu_ops_root"
+              action="action_today" sequence="1"/>
+    <menuitem id="menu_ops_assignments" name="Assignments" parent="menu_ops_root"
+              action="action_allocations" sequence="2"/>
+    <menuitem id="menu_ops_vehicles" name="Vehicles" parent="menu_ops_root"
+              action="action_ops_vehicles" sequence="3"/>
+    <menuitem id="menu_ops_drivers" name="Drivers" parent="menu_ops_root"
+              action="action_drivers" sequence="4"/>
+    <menuitem id="menu_ops_compliance" name="Compliance" parent="menu_ops_root"
+              action="action_compliance_queue" sequence="5"
+              groups="fleetflow_operations.group_ops_compliance,fleetflow_operations.group_ops_fleet_manager"/>
+    <menuitem id="menu_ops_holds" name="Holds" parent="menu_ops_root"
+              action="action_holds" sequence="6"/>
+
+    <!-- Configuration -->
+    <menuitem id="menu_ops_config" name="Configuration" parent="menu_ops_root" sequence="9"
+              groups="fleetflow_operations.group_ops_compliance,fleetflow_operations.group_ops_fleet_manager"/>
+    <menuitem id="menu_ops_evidence" name="Evidence" parent="menu_ops_config"
+              action="action_credentials" sequence="1"/>
+    <menuitem id="menu_ops_channels" name="Channels" parent="menu_ops_config"
+              action="action_channels" sequence="2"/>
+    <menuitem id="menu_ops_permits" name="Operating permits" parent="menu_ops_config"
+              action="action_authorizations" sequence="3"/>
+    <menuitem id="menu_ops_profiles" name="Operating profiles" parent="menu_ops_config"
+              action="action_profiles" sequence="4"/>
+</odoo>
