@@ -16,7 +16,7 @@ class OperationsCase(TransactionCase):
 
         def make_user(login, *groups):
             return cls.env["res.users"].with_context(no_reset_password=True).create({
-                "name": login, "login": login,
+                "name": login, "login": login, "email": login + "@example.com",
                 "company_id": cls.company.id, "company_ids": [(6, 0, cls.company.ids)],
                 "groups_id": [(6, 0, [cls.env.ref(g).id for g in groups])],
             })
@@ -105,6 +105,27 @@ class OperationsCase(TransactionCase):
         self.make_credential("driver_licence", "driver_id", self.driver)
         self.make_credential("professional_permit", "driver_id", self.driver)
         self.make_channel("uber", "UberX", "driver_id", self.driver)
+
+    def make_allocation(self, start=None, end=None, vehicle=None, driver=None,
+                        channels=None, mode="chauffeur", user=None):
+        if start is None or end is None:
+            start, end = self.interval()
+        env = self.env
+        if user:
+            env = env(user=user)
+        alloc = env["fleetflow.allocation"].create({
+            "company_id": self.company.id, "operating_mode": mode,
+            "vehicle_id": (vehicle or self.vehicle).id,
+            "driver_id": (driver if driver is not None else self.driver).id,
+            "planned_start": start, "planned_end": end,
+        })
+        if channels:
+            alloc.channel_enrolment_ids = [(6, 0, [c.id for c in channels])]
+        return alloc
+
+    def uber_enrolment(self):
+        return self.env["fleetflow.channel.enrolment"].search([
+            ("driver_id", "=", self.driver.id), ("channel", "=", "uber")], limit=1)
 
     def evaluate(self, channel_products=None, mode="chauffeur", vehicle=None, driver=None,
                  start=None, end=None, user=None):

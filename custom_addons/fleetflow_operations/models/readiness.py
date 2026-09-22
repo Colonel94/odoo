@@ -70,6 +70,9 @@ class FleetflowReadiness(models.AbstractModel):
         if operating_mode == "chauffeur":
             reasons += self._check_driver(company, driver)
 
+        # -- Active dispatch-blocking hold (always enforced) --------------
+        reasons.append(self._check_hold(vehicle))
+
         # -- Document requirements (whole interval) -----------------------
         doc_map = [
             ("operating_authorization", None),  # handled specially below
@@ -140,6 +143,17 @@ class FleetflowReadiness(models.AbstractModel):
             out.append(self._reason("asset", constants.NEEDS_REVIEW, "vehicle_unreviewed",
                                     _("Vehicle %s is operationally unreviewed.") % vehicle.display_name))
         return out or [self._reason("asset", constants.READY, "asset_ok", _("Vehicle is active and authorised."))]
+
+    def _check_hold(self, vehicle):
+        if not vehicle:
+            return self._reason("hold", constants.READY, "hold_na", _("No vehicle."))
+        blocking = self.env["fleetflow.vehicle.hold"].search([
+            ("vehicle_id", "=", vehicle.id), ("state", "=", "active"),
+            ("dispatch_blocking", "=", True)])
+        if blocking:
+            return self._reason("hold", constants.BLOCKED, "vehicle_on_hold",
+                                _("Vehicle has %d active dispatch-blocking hold(s).") % len(blocking))
+        return self._reason("hold", constants.READY, "no_hold", _("No blocking holds."))
 
     def _check_driver(self, company, driver):
         if not driver:

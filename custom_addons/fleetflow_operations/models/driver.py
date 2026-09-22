@@ -49,6 +49,11 @@ class FleetflowDriver(models.Model):
     permitted_mode = fields.Selection(
         constants.OPERATING_MODES, string="Permitted mode", default="chauffeur",
     )
+    ff_alloc_lock = fields.Integer(
+        string="Allocation lock counter", default=0, copy=False,
+        help="Bumped inside a locked transaction to serialise competing "
+             "reservations (see fleet.vehicle.ff_alloc_lock).",
+    )
     credential_ids = fields.One2many(
         "fleetflow.credential", "driver_id", string="Driver evidence",
     )

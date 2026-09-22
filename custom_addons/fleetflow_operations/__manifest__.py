@@ -39,6 +39,7 @@ research and source register behind the design.
         "security/operations_groups.xml",
         "security/ir.model.access.csv",
         "security/operations_rules.xml",
+        "data/operations_data.xml",
     ],
     "application": True,
     "installable": True,

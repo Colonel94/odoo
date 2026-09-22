@@ -78,7 +78,27 @@ class FleetVehicle(models.Model):
     ff_channel_enrolment_ids = fields.One2many(
         "fleetflow.channel.enrolment", "vehicle_id", string="Channel enrolments",
     )
-    # Hold relations are added in the allocation/holds commit.
+    ff_hold_ids = fields.One2many(
+        "fleetflow.vehicle.hold", "vehicle_id", string="Holds",
+    )
+    ff_allocation_ids = fields.One2many(
+        "fleetflow.allocation", "vehicle_id", string="Allocations",
+    )
+    ff_active_hold_count = fields.Integer(
+        string="Active blocking holds", compute="_compute_active_hold_count",
+    )
+    ff_alloc_lock = fields.Integer(
+        string="Allocation lock counter", default=0, copy=False,
+        help="Bumped inside a locked transaction to serialise competing "
+             "reservations (Odoo runs REPEATABLE READ; updating the row forces "
+             "first-updater-wins on concurrent confirms).",
+    )
+
+    @api.depends("ff_hold_ids.state", "ff_hold_ids.dispatch_blocking")
+    def _compute_active_hold_count(self):
+        for vehicle in self:
+            vehicle.ff_active_hold_count = len(vehicle.ff_hold_ids.filtered(
+                lambda h: h.state == "active" and h.dispatch_blocking))
 
     @api.constrains("ff_manufacture_date", "ff_first_registration_date")
     def _check_operational_dates(self):

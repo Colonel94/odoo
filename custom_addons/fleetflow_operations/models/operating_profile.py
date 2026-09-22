@@ -66,7 +66,7 @@ class FleetflowOperatingProfile(models.Model):
     ]
 
     def action_publish(self):
-        if not self.env.user.has_group("fleetflow_operations.group_ops_compliance"):
+        if not (self.env.user.has_group("fleetflow_operations.group_ops_compliance") or self.env.su):
             raise AccessError(_("Only a compliance reviewer can publish an operating profile."))
         for rec in self:
             # Supersede any currently published profile for the same key.

@@ -7,3 +7,5 @@ from . import credential
 from . import channel_enrolment
 from . import operating_profile
 from . import readiness
+from . import vehicle_hold
+from . import allocation

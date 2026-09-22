@@ -140,7 +140,7 @@ class FleetflowCredential(models.Model):
         return super().write(vals)
 
     def _require_compliance(self):
-        if not self.env.user.has_group("fleetflow_operations.group_ops_compliance"):
+        if not (self.env.user.has_group("fleetflow_operations.group_ops_compliance") or self.env.su):
             raise AccessError(_("Only a compliance reviewer can verify or reject evidence."))
 
     def action_verify(self):
