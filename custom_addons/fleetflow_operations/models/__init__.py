@@ -6,3 +6,4 @@ from . import operating_authorization
 from . import credential
 from . import channel_enrolment
 from . import operating_profile
+from . import readiness

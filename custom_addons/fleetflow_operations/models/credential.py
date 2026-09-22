@@ -184,7 +184,17 @@ class FleetflowCredential(models.Model):
     # ------------------------------------------------------------------
     # Validity helpers (used by the readiness service)
     # ------------------------------------------------------------------
-    def _covers_interval(self, start_dt, end_dt, tzinfo):
+    @staticmethod
+    def _local_midnight(day, tz):
+        """Timezone-aware midnight of `day` in pytz zone `tz`.
+
+        Uses tz.localize (never datetime.replace, which would apply the zone's
+        historical LMT offset instead of the real standard offset).
+        """
+        from datetime import datetime, time
+        return tz.localize(datetime.combine(day, time.min))
+
+    def _covers_interval(self, start_dt, end_dt, tz):
         """True if this evidence is verified and valid for the WHOLE [start,end).
 
         Date-only validity uses a local-day boundary: 'valid until D' means valid
@@ -194,23 +204,19 @@ class FleetflowCredential(models.Model):
         self.ensure_one()
         if self.state != "verified":
             return False
-        from datetime import datetime, time, timedelta
-        if self.date_start:
-            start_boundary = datetime.combine(self.date_start, time.min).replace(tzinfo=tzinfo)
-            if start_dt < start_boundary:
-                return False
+        from datetime import timedelta
+        if self.date_start and start_dt < self._local_midnight(self.date_start, tz):
+            return False
         if self.date_end:
-            # End of the local day date_end (exclusive upper boundary = next midnight).
-            end_boundary = datetime.combine(self.date_end + timedelta(days=1), time.min).replace(tzinfo=tzinfo)
-            if end_dt > end_boundary:
+            # End of local day date_end (exclusive upper boundary = next midnight).
+            if end_dt > self._local_midnight(self.date_end + timedelta(days=1), tz):
                 return False
         return True
 
-    def _expires_after(self, at_dt, tzinfo):
+    def _expires_after(self, at_dt, tz):
         """True if a valid-until exists and falls after `at_dt` (a later renewal)."""
         self.ensure_one()
         if self.state != "verified" or not self.date_end:
             return False
-        from datetime import datetime, time, timedelta
-        end_boundary = datetime.combine(self.date_end + timedelta(days=1), time.min).replace(tzinfo=tzinfo)
-        return end_boundary > at_dt
+        from datetime import timedelta
+        return self._local_midnight(self.date_end + timedelta(days=1), tz) > at_dt
