@@ -63,13 +63,37 @@ class FleetflowAllocation(models.Model):
         for vals in vals_list:
             if vals.get("name", _("New")) == _("New"):
                 vals["name"] = self.env["ir.sequence"].next_by_code("fleetflow.allocation") or _("New")
+            # A new allocation always starts draft with no custody/readiness,
+            # whatever the caller or default_* context says. Set False explicitly
+            # (not pop) so a default_<field> context key cannot refill it.
+            for key in self._PROTECTED:
+                vals[key] = False
+            vals["state"] = "draft"
         return super().create(vals_list)
+
+    # State/custody/readiness are advanced ONLY through the workflow actions,
+    # never by a direct write/import/default context.
+    _PROTECTED = {"state", "custody_out_at", "custody_in_at", "confirmed_by",
+                  "readiness_status", "readiness_snapshot", "readiness_version"}
 
     @api.constrains("planned_start", "planned_end")
     def _check_interval(self):
         for rec in self:
             if rec.planned_start and rec.planned_end and rec.planned_end <= rec.planned_start:
                 raise ValidationError(_("Planned end must be after planned start (half-open interval)."))
+
+    def write(self, vals):
+        if not self.env.context.get("ff_alloc_action"):
+            forbidden = self._PROTECTED & set(vals)
+            if forbidden and vals.get("state") != "draft":
+                raise AccessError(_(
+                    "Allocation state and custody are changed through the workflow "
+                    "actions (confirm/checkout/return/cancel), not by direct edits."
+                ))
+        return super().write(vals)
+
+    def _apply(self, vals):
+        return super(FleetflowAllocation, self.with_context(ff_alloc_action=True)).write(vals)
 
     # ------------------------------------------------------------------
     # Concurrency-safe transitions
@@ -154,7 +178,7 @@ class FleetflowAllocation(models.Model):
         if conflicts:
             raise UserError(_("The vehicle or driver is already reserved for an overlapping interval (%s).")
                             % ", ".join(conflicts.mapped("name")))
-        self.write({
+        self._apply({
             "state": "confirmed", "confirmed_by": self.env.uid,
             "readiness_status": result["status"],
             "readiness_snapshot": json.dumps(result, default=str),
@@ -189,7 +213,7 @@ class FleetflowAllocation(models.Model):
         if odometer:
             self._validate_odometer(odometer)
             vals["checkout_odometer"] = odometer
-        self.write(vals)
+        self._apply(vals)
         self.message_post(body=_("Checked out."))
         return True
 
@@ -209,7 +233,7 @@ class FleetflowAllocation(models.Model):
         if odometer:
             self._validate_odometer(odometer, is_return=True)
             vals["return_odometer"] = odometer
-        self.write(vals)
+        self._apply(vals)
         if defect:
             self._raise_defect_hold(condition)
         self.message_post(body=_("Returned.%s") % (_(" Defect reported.") if defect else ""))
@@ -220,7 +244,7 @@ class FleetflowAllocation(models.Model):
         self._require_dispatcher()
         if self.state not in ("draft", "confirmed"):
             raise UserError(_("Only a draft or confirmed allocation can be cancelled (not after checkout)."))
-        self.write({"state": "cancelled"})
+        self._apply({"state": "cancelled"})
         return True
 
     def action_check_readiness(self):

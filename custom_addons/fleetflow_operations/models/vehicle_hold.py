@@ -58,6 +58,16 @@ class FleetflowVehicleHold(models.Model):
                 hold.vehicle_id.display_name or "?",
             )
 
+    _PROTECTED = {"state", "cleared_by", "cleared_on", "clear_note"}
+
+    def write(self, vals):
+        # A hold is cleared only through action_clear, never by a direct write.
+        if not self.env.context.get("ff_hold_action") and self._PROTECTED & set(vals):
+            raise AccessError(_(
+                "A hold is cleared through the Clear action (with a note), not by "
+                "a direct edit."))
+        return super().write(vals)
+
     def action_clear(self, note=None):
         """Clear THIS hold only. Requires fleet-manager rights and a note."""
         if not (self.env.user.has_group("fleetflow_operations.group_ops_fleet_manager")
@@ -69,7 +79,7 @@ class FleetflowVehicleHold(models.Model):
                 continue
             if not (note and note.strip()):
                 raise UserError(_("Clearing a hold requires a reason/evidence note."))
-            hold.write({
+            hold.with_context(ff_hold_action=True).write({
                 "state": "cleared", "cleared_by": self.env.uid,
                 "cleared_on": fields.Datetime.now(), "clear_note": note.strip(),
             })
