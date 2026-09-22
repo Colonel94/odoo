@@ -39,4 +39,52 @@
         <field name="domain_force">[(1, '=', 1)]</field>
     </record>
 
+    <!-- Company isolation for evidence, channels and profiles. -->
+    <record id="rule_credential_company" model="ir.rule">
+        <field name="name">Credential: company isolation</field>
+        <field name="model_id" ref="model_fleetflow_credential"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+
+    <record id="rule_channel_company" model="ir.rule">
+        <field name="name">Channel enrolment: company isolation</field>
+        <field name="model_id" ref="model_fleetflow_channel_enrolment"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+
+    <record id="rule_profile_company" model="ir.rule">
+        <field name="name">Operating profile: company isolation</field>
+        <field name="model_id" ref="model_fleetflow_operating_profile"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+
+    <!-- A driver may read only their own evidence metadata; staff see all. -->
+    <record id="rule_credential_driver_self" model="ir.rule">
+        <field name="name">Credential: driver own evidence only</field>
+        <field name="model_id" ref="model_fleetflow_credential"/>
+        <field name="groups" eval="[(4, ref('group_ops_driver'))]"/>
+        <field name="domain_force">[('driver_id.user_id', '=', user.id)]</field>
+    </record>
+
+    <record id="rule_credential_staff_all" model="ir.rule">
+        <field name="name">Credential: staff see all company evidence</field>
+        <field name="model_id" ref="model_fleetflow_credential"/>
+        <field name="groups" eval="[(4, ref('group_ops_dispatcher')), (4, ref('group_ops_compliance')), (4, ref('group_ops_fleet_manager'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+
+    <!-- Operations staff see all vehicles in their companies. Fleet's own user
+         rule only exposes vehicles the user manages/drives; this permissive
+         company rule is OR'd with it so dispatch/compliance can operate the
+         whole register. Driver vehicle scope stays narrow (fleet defaults). -->
+    <record id="rule_vehicle_ops_staff" model="ir.rule">
+        <field name="name">Vehicle: operations staff company scope</field>
+        <field name="model_id" ref="fleet.model_fleet_vehicle"/>
+        <field name="groups" eval="[(4, ref('group_ops_dispatcher')), (4, ref('group_ops_compliance')), (4, ref('group_ops_fleet_manager'))]"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+
 </odoo>

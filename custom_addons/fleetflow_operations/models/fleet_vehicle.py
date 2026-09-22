@@ -72,9 +72,13 @@ class FleetVehicle(models.Model):
         help="Existing vehicles are operationally unreviewed until a compliance "
              "reviewer confirms them. Migration never approves a vehicle by default.",
     )
-    # Evidence and holds relations are added when those models land
-    # (fleetflow.credential in the evidence commit, fleetflow.vehicle.hold in
-    # the allocation/holds commit).
+    ff_credential_ids = fields.One2many(
+        "fleetflow.credential", "vehicle_id", string="Vehicle evidence",
+    )
+    ff_channel_enrolment_ids = fields.One2many(
+        "fleetflow.channel.enrolment", "vehicle_id", string="Channel enrolments",
+    )
+    # Hold relations are added in the allocation/holds commit.
 
     @api.constrains("ff_manufacture_date", "ff_first_registration_date")
     def _check_operational_dates(self):

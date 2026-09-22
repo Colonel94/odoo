@@ -49,7 +49,12 @@ class FleetflowDriver(models.Model):
     permitted_mode = fields.Selection(
         constants.OPERATING_MODES, string="Permitted mode", default="chauffeur",
     )
-    # Driver evidence relation (credential_ids) is added in the evidence commit.
+    credential_ids = fields.One2many(
+        "fleetflow.credential", "driver_id", string="Driver evidence",
+    )
+    channel_enrolment_ids = fields.One2many(
+        "fleetflow.channel.enrolment", "driver_id", string="Channel enrolments",
+    )
 
     _sql_constraints = [
         ("employee_ref_company_uniq",

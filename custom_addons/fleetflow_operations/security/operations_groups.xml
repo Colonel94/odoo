@@ -19,7 +19,7 @@
     <record id="group_ops_dispatcher" model="res.groups">
         <field name="name">Operations Dispatcher</field>
         <field name="category_id" ref="module_category_operations"/>
-        <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
+        <field name="implied_ids" eval="[(4, ref('base.group_user')), (4, ref('fleet.fleet_group_user'))]"/>
         <field name="comment">Plans and confirms allocations; sees readiness reasons but not raw private documents.</field>
     </record>
 
@@ -27,7 +27,7 @@
     <record id="group_ops_compliance" model="res.groups">
         <field name="name">Compliance Reviewer</field>
         <field name="category_id" ref="module_category_operations"/>
-        <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
+        <field name="implied_ids" eval="[(4, ref('base.group_user')), (4, ref('fleet.fleet_group_user'))]"/>
         <field name="comment">Verifies operating authorizations, evidence and publishes operating policy.</field>
     </record>
 
@@ -35,7 +35,7 @@
     <record id="group_ops_fleet_manager" model="res.groups">
         <field name="name">Fleet Manager</field>
         <field name="category_id" ref="module_category_operations"/>
-        <field name="implied_ids" eval="[(4, ref('group_ops_dispatcher'))]"/>
+        <field name="implied_ids" eval="[(4, ref('group_ops_dispatcher')), (4, ref('fleet.fleet_group_manager'))]"/>
         <field name="comment">Manages vehicle holds and the operations register.</field>
     </record>
 

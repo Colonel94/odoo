@@ -9,3 +9,16 @@ access_plate_log_compliance,plate log compliance,model_fleetflow_vehicle_plate_l
 access_auth_dispatcher,authorization dispatcher,model_fleetflow_operating_authorization,group_ops_dispatcher,1,0,0,0
 access_auth_compliance,authorization compliance,model_fleetflow_operating_authorization,group_ops_compliance,1,1,1,1
 access_auth_manager,authorization manager,model_fleetflow_operating_authorization,group_ops_fleet_manager,1,0,0,0
+access_credential_dispatcher,credential dispatcher,model_fleetflow_credential,group_ops_dispatcher,1,0,0,0
+access_credential_compliance,credential compliance,model_fleetflow_credential,group_ops_compliance,1,1,1,0
+access_credential_manager,credential fleet manager,model_fleetflow_credential,group_ops_fleet_manager,1,0,0,0
+access_credential_driver,credential driver,model_fleetflow_credential,group_ops_driver,1,0,0,0
+access_channel_dispatcher,channel dispatcher,model_fleetflow_channel_enrolment,group_ops_dispatcher,1,1,1,0
+access_channel_compliance,channel compliance,model_fleetflow_channel_enrolment,group_ops_compliance,1,1,1,1
+access_channel_manager,channel fleet manager,model_fleetflow_channel_enrolment,group_ops_fleet_manager,1,1,1,1
+access_profile_dispatcher,profile dispatcher,model_fleetflow_operating_profile,group_ops_dispatcher,1,0,0,0
+access_profile_compliance,profile compliance,model_fleetflow_operating_profile,group_ops_compliance,1,1,1,1
+access_profile_manager,profile fleet manager,model_fleetflow_operating_profile,group_ops_fleet_manager,1,0,0,0
+access_vehicle_ops_driver,vehicle read for driver,fleet.model_fleet_vehicle,group_ops_driver,1,0,0,0
+access_vehicle_model_ops_driver,vehicle model read for driver,fleet.model_fleet_vehicle_model,group_ops_driver,1,0,0,0
+access_vehicle_brand_ops_driver,vehicle brand read for driver,fleet.model_fleet_vehicle_model_brand,group_ops_driver,1,0,0,0

@@ -45,7 +45,10 @@ class FleetflowOperatingAuthorization(models.Model):
     )
     verified_by = fields.Many2one("res.users", readonly=True, copy=False)
     verified_on = fields.Datetime(readonly=True, copy=False)
-    # A link to fleetflow.credential is added in the evidence commit.
+    evidence_id = fields.Many2one(
+        "fleetflow.credential", string="Supporting evidence",
+        help="Linked verified evidence document for this authorization.",
+    )
 
     @api.constrains("date_start", "date_end")
     def _check_dates(self):
