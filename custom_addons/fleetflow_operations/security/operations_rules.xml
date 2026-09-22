@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+
+    <!-- Company isolation inside a tenant (NOT customer/tenant isolation). -->
+    <record id="rule_driver_company" model="ir.rule">
+        <field name="name">Driver: company isolation</field>
+        <field name="model_id" ref="model_fleetflow_driver"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+
+    <record id="rule_authorization_company" model="ir.rule">
+        <field name="name">Authorization: company isolation</field>
+        <field name="model_id" ref="model_fleetflow_operating_authorization"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+
+    <record id="rule_plate_log_company" model="ir.rule">
+        <field name="name">Plate log: company isolation</field>
+        <field name="model_id" ref="model_fleetflow_vehicle_plate_log"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+
+    <!-- A driver app-user sees only their own driver record. Dispatchers,
+         compliance and fleet managers see all drivers in their companies. -->
+    <record id="rule_driver_self" model="ir.rule">
+        <field name="name">Driver: own record only</field>
+        <field name="model_id" ref="model_fleetflow_driver"/>
+        <field name="groups" eval="[(4, ref('group_ops_driver'))]"/>
+        <field name="domain_force">[('user_id', '=', user.id)]</field>
+    </record>
+
+    <record id="rule_driver_staff_all" model="ir.rule">
+        <field name="name">Driver: staff see all company drivers</field>
+        <field name="model_id" ref="model_fleetflow_driver"/>
+        <field name="groups" eval="[(4, ref('group_ops_dispatcher')), (4, ref('group_ops_compliance'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+
+</odoo>

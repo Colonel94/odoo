@@ -40,7 +40,8 @@ def main():
     ensure_env()
     if args.command == 'init':
         compose(['up', '-d', '--wait', 'db'])
-        compose(['run', '--rm', 'web', '-i', 'fleetflow', '--without-demo=all', '--stop-after-init', '--no-http'])
+        # Installing fleetflow_operations pulls in fleetflow as a dependency.
+        compose(['run', '--rm', 'web', '-i', 'fleetflow_operations', '--without-demo=all', '--stop-after-init', '--no-http'])
         compose(['run', '--rm', 'web', 'bootstrap'])
         compose(['up', '-d', '--wait', 'web'])
         print('Open http://localhost:8069. Login: admin. Password: FLEETFLOW_ADMIN_PASSWORD in fleetflow/.env.')
@@ -58,8 +59,8 @@ def main():
         project = 'fleetflow-test'
         try:
             compose(['up', '-d', '--wait', 'db'], project)
-            compose(['run', '--rm', 'web', '-i', 'fleetflow', '--without-demo=all', '--test-enable',
-                     '--test-tags', '/fleetflow', '--stop-after-init', '--no-http'], project)
+            compose(['run', '--rm', 'web', '-i', 'fleetflow_operations', '--without-demo=all', '--test-enable',
+                     '--test-tags', '/fleetflow,/fleetflow_operations', '--stop-after-init', '--no-http'], project)
         finally:
             compose(['down', '-v'], project)
 

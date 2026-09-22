@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+
+    <record id="module_category_operations" model="ir.module.category">
+        <field name="name">FleetFlow Operations</field>
+        <field name="description">Dubai fleet operations roles.</field>
+        <field name="sequence">21</field>
+    </record>
+
+    <!-- Driver: sees only their own assignments and permitted data. -->
+    <record id="group_ops_driver" model="res.groups">
+        <field name="name">Driver</field>
+        <field name="category_id" ref="module_category_operations"/>
+        <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
+        <field name="comment">Sees only their own shift and permitted vehicle context.</field>
+    </record>
+
+    <!-- Dispatcher: manages allocations, sees non-sensitive readiness. -->
+    <record id="group_ops_dispatcher" model="res.groups">
+        <field name="name">Operations Dispatcher</field>
+        <field name="category_id" ref="module_category_operations"/>
+        <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
+        <field name="comment">Plans and confirms allocations; sees readiness reasons but not raw private documents.</field>
+    </record>
+
+    <!-- Compliance reviewer: verifies authorizations, evidence and policy. -->
+    <record id="group_ops_compliance" model="res.groups">
+        <field name="name">Compliance Reviewer</field>
+        <field name="category_id" ref="module_category_operations"/>
+        <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
+        <field name="comment">Verifies operating authorizations, evidence and publishes operating policy.</field>
+    </record>
+
+    <!-- Fleet manager: manages holds; inherits dispatcher visibility. -->
+    <record id="group_ops_fleet_manager" model="res.groups">
+        <field name="name">Fleet Manager</field>
+        <field name="category_id" ref="module_category_operations"/>
+        <field name="implied_ids" eval="[(4, ref('group_ops_dispatcher'))]"/>
+        <field name="comment">Manages vehicle holds and the operations register.</field>
+    </record>
+
+</odoo>

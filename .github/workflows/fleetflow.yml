@@ -1,9 +1,9 @@
 name: FleetFlow checks
 on:
   push:
-    paths: ["custom_addons/fleetflow/**", "fleetflow/**", ".github/workflows/fleetflow.yml"]
+    paths: ["custom_addons/fleetflow/**", "custom_addons/fleetflow_operations/**", "fleetflow/**", ".github/workflows/fleetflow.yml"]
   pull_request:
-    paths: ["custom_addons/fleetflow/**", "fleetflow/**", ".github/workflows/fleetflow.yml"]
+    paths: ["custom_addons/fleetflow/**", "custom_addons/fleetflow_operations/**", "fleetflow/**", ".github/workflows/fleetflow.yml"]
   workflow_dispatch:
 permissions:
   contents: read
