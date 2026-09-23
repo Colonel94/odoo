@@ -72,15 +72,20 @@ class TestEvidence(OperationsCase):
                                     end=date.today() + timedelta(days=10))
         with self.assertRaises(UserError):
             cred.write({"date_end": date.today() + timedelta(days=400)})
-        # Supersede with a renewal; history is retained.
+        # Supersede with a renewal; the old evidence stays effective until the
+        # renewal is verified, so drafting a renewal never drops coverage.
         renewal = cred.with_user(self.compliance).action_supersede({
             "name": "REG-renewal", "date_start": date.today(),
             "date_end": date.today() + timedelta(days=400),
         })
+        self.assertEqual(renewal.state, "draft")
+        self.assertEqual(cred.state, "verified")
+        self.assertEqual(renewal.supersedes_id, cred)
+        # Once verified, the predecessor is superseded and history is retained.
+        renewal.with_user(self.compliance).action_verify()
         self.assertEqual(cred.state, "superseded")
         self.assertEqual(cred.superseded_by_id, renewal)
-        self.assertEqual(renewal.supersedes_id, cred)
-        self.assertEqual(renewal.state, "draft")
+        self.assertEqual(renewal.state, "verified")
 
     def test_covers_whole_interval_local_boundary(self):
         import pytz

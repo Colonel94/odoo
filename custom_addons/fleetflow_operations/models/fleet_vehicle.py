@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from odoo import api, fields, models, _
-from odoo.exceptions import ValidationError
+from odoo.exceptions import AccessError, ValidationError
 
 from . import constants
 
@@ -110,12 +110,32 @@ class FleetVehicle(models.Model):
                     "First registration cannot precede the manufacture date on %s."
                 ) % vehicle.display_name)
 
+    def write(self, vals):
+        # The operational review state is authority-bearing: a vehicle becomes
+        # dispatchable only when a compliance reviewer confirms it. A user who
+        # merely holds vehicle-write rights (e.g. a fleet manager) must not be
+        # able to set it by a direct edit; it moves only through the compliance
+        # actions below (which write at the ORM level via super()).
+        if "ff_operational_state" in vals:
+            raise AccessError(_(
+                "A vehicle's operational review state is set by the compliance "
+                "review action, not by a direct edit."))
+        return super().write(vals)
+
+    def _require_compliance(self):
+        if not (self.env.user.has_group("fleetflow_operations.group_ops_compliance")
+                or self.env.su):
+            raise AccessError(_("Only a compliance reviewer can change a vehicle's operational review state."))
+
     def ff_mark_reviewed(self):
         """Compliance action: mark a vehicle operationally reviewed."""
-        if not self.env.user.has_group("fleetflow_operations.group_ops_compliance"):
-            raise ValidationError(_("Only a compliance reviewer can mark a vehicle reviewed."))
-        self.write({"ff_operational_state": "reviewed"})
-        return True
+        self._require_compliance()
+        return super().write({"ff_operational_state": "reviewed"})
+
+    def ff_mark_unreviewed(self):
+        """Compliance action: return a vehicle to operationally unreviewed."""
+        self._require_compliance()
+        return super().write({"ff_operational_state": "unreviewed"})
 
 
 class FleetVehiclePlateLog(models.Model):

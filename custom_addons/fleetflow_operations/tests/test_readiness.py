@@ -21,8 +21,8 @@ class TestReadiness(OperationsCase):
 
     def test_no_published_profile_is_needs_review(self):
         # Reviewed vehicle but no profile published at all.
-        self.vehicle.write({"ff_operator_company_id": self.company.id,
-                            "ff_operational_state": "reviewed"})
+        self.vehicle.write({"ff_operator_company_id": self.company.id})
+        self.vehicle.with_user(self.compliance).ff_mark_reviewed()
         result = self.evaluate(user=self.dispatcher)
         self.assertEqual(result["status"], constants.NEEDS_REVIEW)
         self.assertIn("no_policy", self._codes(result))
@@ -30,11 +30,13 @@ class TestReadiness(OperationsCase):
 
     def test_expired_document_blocks(self):
         self.ready_chauffeur_setup()
-        # Insurance already expired before the interval.
-        ins = self.env["fleetflow.credential"].search([
-            ("vehicle_id", "=", self.vehicle.id), ("doc_kind", "=", "insurance")])
-        ins.with_context(ff_credential_action=True).write({
-            "date_end": date.today() - timedelta(days=1)})
+        # Replace the valid insurance with an already-expired verified one (a
+        # verified document cannot be edited to expire it in place -- that is the
+        # frozen-evidence guard; here we model a genuinely expired document).
+        self.env["fleetflow.credential"].search([
+            ("vehicle_id", "=", self.vehicle.id), ("doc_kind", "=", "insurance")]).unlink()
+        self.make_credential("insurance", "vehicle_id", self.vehicle,
+                             end=date.today() - timedelta(days=1))
         result = self.evaluate(user=self.dispatcher)
         self.assertEqual(result["status"], constants.BLOCKED)
         self.assertIn("doc_expired", self._codes(result))
@@ -42,15 +44,12 @@ class TestReadiness(OperationsCase):
 
     def test_expiry_mid_interval_blocks(self):
         self.ready_chauffeur_setup()
-        start, end = self.interval()  # tomorrow 08:00-18:00
-        # Permit valid through the START day but not the whole interval is a
-        # separate case; here make the licence expire on the interval day so the
-        # 18:00 end exceeds end-of-day is fine -> instead expire the day BEFORE end.
-        lic = self.env["fleetflow.credential"].search([
-            ("driver_id", "=", self.driver.id), ("doc_kind", "=", "driver_licence")])
-        # Valid until *today*: covers start-of-interval? interval is tomorrow, so
-        # valid-until today means expired before interval -> blocked.
-        lic.with_context(ff_credential_action=True).write({"date_end": date.today()})
+        # Licence valid until *today*: the interval is tomorrow, so it is expired
+        # before the interval starts -> blocked. Model it as a genuinely expired
+        # verified document rather than editing a frozen one.
+        self.env["fleetflow.credential"].search([
+            ("driver_id", "=", self.driver.id), ("doc_kind", "=", "driver_licence")]).unlink()
+        self.make_credential("driver_licence", "driver_id", self.driver, end=date.today())
         result = self.evaluate(user=self.dispatcher)
         self.assertEqual(result["status"], constants.BLOCKED)
         self.assertIn("doc_expired", self._codes(result))
@@ -76,7 +75,7 @@ class TestReadiness(OperationsCase):
 
     def test_unreviewed_vehicle_is_needs_review(self):
         self.ready_chauffeur_setup()
-        self.vehicle.ff_operational_state = "unreviewed"
+        self.vehicle.with_user(self.compliance).ff_mark_unreviewed()
         result = self.evaluate(user=self.dispatcher)
         self.assertEqual(result["status"], constants.NEEDS_REVIEW)
         self.assertIn("vehicle_unreviewed", self._codes(result))
@@ -99,7 +98,7 @@ class TestReadiness(OperationsCase):
         self.ready_chauffeur_setup()
         enr = self.env["fleetflow.channel.enrolment"].search([
             ("driver_id", "=", self.driver.id), ("channel", "=", "uber")])
-        enr.action_suspend()
+        enr.with_user(self.compliance).action_suspend()
         result = self.evaluate(user=self.dispatcher)
         self.assertEqual(result["status"], constants.BLOCKED)
         self.assertIn("channel_suspended", self._codes(result))
@@ -108,24 +107,33 @@ class TestReadiness(OperationsCase):
         self.ready_chauffeur_setup()
         enr = self.env["fleetflow.channel.enrolment"].search([
             ("driver_id", "=", self.driver.id), ("channel", "=", "uber")])
-        enr.verified_as_of = datetime.now() - timedelta(days=400)
+        # Age the platform verification (verified_as_of is reviewer-protected, so
+        # set it through the internal transition rather than a direct write).
+        enr._apply({"verified_as_of": datetime.now() - timedelta(days=400)})
         result = self.evaluate(user=self.dispatcher)
         self.assertEqual(result["status"], constants.NEEDS_REVIEW)
         self.assertIn("channel_stale", self._codes(result))
 
     def test_renewal_supersede_makes_ready_again(self):
         self.ready_chauffeur_setup()
-        ins = self.env["fleetflow.credential"].search([
-            ("vehicle_id", "=", self.vehicle.id), ("doc_kind", "=", "insurance")])
-        ins.with_context(ff_credential_action=True).write({"date_end": date.today() - timedelta(days=1)})
+        # Model a genuinely expired verified insurance.
+        self.env["fleetflow.credential"].search([
+            ("vehicle_id", "=", self.vehicle.id), ("doc_kind", "=", "insurance")]).unlink()
+        ins = self.make_credential("insurance", "vehicle_id", self.vehicle,
+                                   end=date.today() - timedelta(days=1))
         self.assertEqual(self.evaluate(user=self.dispatcher)["status"], constants.BLOCKED)
         renewal = ins.with_user(self.compliance).action_supersede({
             "name": "INS-renewal", "date_start": date.today() - timedelta(days=1),
             "date_end": date.today() + timedelta(days=365),
         })
-        # A renewal is new evidence and must itself be verified before it counts.
-        self.assertEqual(self.evaluate(user=self.dispatcher)["status"], constants.NEEDS_REVIEW)
+        # The renewal is not yet verified; the old (expired) evidence still
+        # stands, so the request stays blocked -- coverage is never opened by a
+        # mere draft, nor is the still-listed old document ignored.
+        self.assertEqual(ins.state, "verified")
+        self.assertEqual(self.evaluate(user=self.dispatcher)["status"], constants.BLOCKED)
         renewal.with_user(self.compliance).action_verify()
+        # Once verified, the renewal takes over and the predecessor is superseded.
+        self.assertEqual(ins.state, "superseded")
         result = self.evaluate(user=self.dispatcher)
         self.assertEqual(result["status"], constants.READY, self._codes(result))
 

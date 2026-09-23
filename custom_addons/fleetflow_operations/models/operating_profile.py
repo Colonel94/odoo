@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from odoo import api, fields, models, _
-from odoo.exceptions import AccessError, ValidationError
+from odoo.exceptions import AccessError, UserError, ValidationError
 
 from . import constants
 
@@ -65,6 +65,35 @@ class FleetflowOperatingProfile(models.Model):
          "A profile with this mode/channel/product/version already exists."),
     ]
 
+    # A published policy version is frozen: its scope and required checks are the
+    # basis of confirmed decisions and cannot change under them. Corrections are
+    # made by publishing a NEW version, never by editing a published one.
+    _FROZEN_FIELDS = {
+        "operating_mode", "channel", "product", "version",
+        "require_operating_authorization", "require_vehicle_registration",
+        "require_insurance", "require_inspection", "require_tracking_cert",
+        "require_driver_licence", "require_professional_permit",
+        "require_channel_approval", "require_category_evidence",
+        "enforce_end_of_use", "channel_freshness_days",
+    }
+
+    def write(self, vals):
+        if vals.get("state") == "published":
+            raise AccessError(_(
+                "Publish a profile through the Publish action, which archives the "
+                "prior version; the published state is not set by a direct write."))
+        if self._FROZEN_FIELDS & set(vals):
+            for rec in self:
+                if rec.state in ("published", "archived"):
+                    raise UserError(_(
+                        "Policy version %s is frozen (%s). Create a new version "
+                        "and publish it; a published version is never edited in "
+                        "place.") % (rec.name, rec.state))
+        return super().write(vals)
+
+    def _apply(self, vals):
+        return super().write(vals)
+
     def action_publish(self):
         if not (self.env.user.has_group("fleetflow_operations.group_ops_compliance") or self.env.su):
             raise AccessError(_("Only a compliance reviewer can publish an operating profile."))
@@ -78,8 +107,8 @@ class FleetflowOperatingProfile(models.Model):
                 ("state", "=", "published"),
                 ("id", "!=", rec.id),
             ])
-            others.write({"state": "archived"})
-        self.write({"state": "published"})
+            others._apply({"state": "archived"})
+        self._apply({"state": "published"})
         return True
 
     @api.model

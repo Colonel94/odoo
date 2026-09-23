@@ -60,12 +60,26 @@ class FleetflowVehicleHold(models.Model):
 
     _PROTECTED = {"state", "cleared_by", "cleared_on", "clear_note"}
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        # A new hold always starts active with no clearance history, whatever the
+        # caller or default_* context supplies.
+        for vals in vals_list:
+            vals["state"] = "active"
+            for key in ("cleared_by", "cleared_on", "clear_note"):
+                vals[key] = False
+        return super().create(vals_list)
+
     def write(self, vals):
-        # A hold is cleared only through action_clear, never by a direct write.
-        if not self.env.context.get("ff_hold_action") and self._PROTECTED & set(vals):
+        # A hold is cleared only through action_clear (with a note); no context
+        # flag opts out of this guard.
+        if self._PROTECTED & set(vals):
             raise AccessError(_(
                 "A hold is cleared through the Clear action (with a note), not by "
                 "a direct edit."))
+        return super().write(vals)
+
+    def _apply(self, vals):
         return super().write(vals)
 
     def action_clear(self, note=None):
@@ -79,7 +93,7 @@ class FleetflowVehicleHold(models.Model):
                 continue
             if not (note and note.strip()):
                 raise UserError(_("Clearing a hold requires a reason/evidence note."))
-            hold.with_context(ff_hold_action=True).write({
+            hold._apply({
                 "state": "cleared", "cleared_by": self.env.uid,
                 "cleared_on": fields.Datetime.now(), "clear_note": note.strip(),
             })

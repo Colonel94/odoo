@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from odoo import api, fields, models, _
-from odoo.exceptions import ValidationError
+from odoo.exceptions import AccessError, ValidationError
 
 from . import constants
 
@@ -55,11 +55,52 @@ class FleetflowChannelEnrolment(models.Model):
             if not (rec.vehicle_id or rec.driver_id):
                 raise ValidationError(_("A channel enrolment needs a vehicle or driver subject."))
 
+    # A dispatcher may create/edit a PENDING enrolment and its metadata, but the
+    # approval status and its verification timestamp are set only through the
+    # reviewer actions -- never a direct write/create (no context flag opts out).
+    _PROTECTED = {"verified_as_of"}
+    _REVIEWED_STATES = ("approved", "suspended", "rejected")
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            if vals.get("state") in self._REVIEWED_STATES:
+                vals["state"] = "pending"
+            vals["verified_as_of"] = False
+        return super().create(vals_list)
+
+    def write(self, vals):
+        if self._PROTECTED & set(vals):
+            raise AccessError(_(
+                "The platform status verification timestamp is set by the review "
+                "actions, not a direct edit."))
+        if vals.get("state") in self._REVIEWED_STATES:
+            raise AccessError(_(
+                "A channel enrolment's approval status is set through the review "
+                "actions (approve/suspend/reject), not a direct write."))
+        return super().write(vals)
+
+    def _apply(self, vals):
+        return super().write(vals)
+
+    def _require_reviewer(self):
+        if not (self.env.user.has_group("fleetflow_operations.group_ops_compliance")
+                or self.env.su):
+            raise AccessError(_(
+                "Only a compliance reviewer can change a channel enrolment's "
+                "approval status."))
+
     def action_approve(self):
-        self.write({"state": "approved", "verified_as_of": fields.Datetime.now()})
+        self._require_reviewer()
+        self._apply({"state": "approved", "verified_as_of": fields.Datetime.now()})
 
     def action_suspend(self):
-        self.write({"state": "suspended", "verified_as_of": fields.Datetime.now()})
+        self._require_reviewer()
+        self._apply({"state": "suspended", "verified_as_of": fields.Datetime.now()})
+
+    def action_reject(self):
+        self._require_reviewer()
+        self._apply({"state": "rejected", "verified_as_of": fields.Datetime.now()})
 
     def _is_fresh(self, at_dt, max_age_days):
         """True if the platform status was verified recently enough per policy."""

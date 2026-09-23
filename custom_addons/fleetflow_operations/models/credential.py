@@ -116,27 +116,33 @@ class FleetflowCredential(models.Model):
         return super().create(clean)
 
     def write(self, vals):
-        internal = self.env.context.get("ff_credential_action")
-        if not internal:
-            forbidden = self._PROTECTED & set(vals)
-            if forbidden:
-                raise AccessError(_(
-                    "Verification history is set through the review actions, not direct writes."
-                ))
-            if vals.get("state") in ("verified", "superseded"):
-                raise AccessError(_(
-                    "Use Verify to record a verified state; it cannot be set directly."
-                ))
-            # A verified document is immutable except through supersession.
-            frozen = {"doc_kind", "operator_company_id", "vehicle_id", "driver_id",
-                      "date_start", "date_end", "reference", "issuer", "attachment_id"}
-            if frozen & set(vals):
-                for rec in self:
-                    if rec.state in ("verified", "superseded"):
-                        raise UserError(_(
-                            "Verified evidence %s is locked. Supersede it with a renewal "
-                            "instead of editing it."
-                        ) % rec.name)
+        # No context flag opts out of these guards. The verified/rejected/
+        # superseded lifecycle and its attribution move only through the review
+        # actions, which write at the ORM level via _apply().
+        forbidden = self._PROTECTED & set(vals)
+        if forbidden:
+            raise AccessError(_(
+                "Verification history is set through the review actions, not direct writes."
+            ))
+        if vals.get("state") in ("verified", "superseded"):
+            raise AccessError(_(
+                "Use Verify to record a verified state; it cannot be set directly."
+            ))
+        # A verified document is immutable except through supersession.
+        frozen = {"doc_kind", "operator_company_id", "vehicle_id", "driver_id",
+                  "date_start", "date_end", "reference", "issuer", "attachment_id"}
+        if frozen & set(vals):
+            for rec in self:
+                if rec.state in ("verified", "superseded"):
+                    raise UserError(_(
+                        "Verified evidence %s is locked. Supersede it with a renewal "
+                        "instead of editing it."
+                    ) % rec.name)
+        return super().write(vals)
+
+    def _apply(self, vals):
+        # Internal transition used by the review actions; bypasses the public
+        # write guard by writing at the ORM level.
         return super().write(vals)
 
     def _require_compliance(self):
@@ -148,9 +154,16 @@ class FleetflowCredential(models.Model):
         for rec in self:
             if rec.state not in ("draft", "pending"):
                 raise UserError(_("Only draft/pending evidence can be verified (%s).") % rec.name)
-        self.with_context(ff_credential_action=True).write({
+        self._apply({
             "state": "verified", "verified_by": self.env.uid, "verified_on": fields.Datetime.now(),
         })
+        # A verified renewal now takes over from the document it supersedes. The
+        # predecessor stayed effective until this moment, so merely drafting a
+        # renewal never opened a coverage gap.
+        for rec in self:
+            predecessor = rec.supersedes_id
+            if predecessor and predecessor.state == "verified":
+                predecessor._apply({"state": "superseded", "superseded_by_id": rec.id})
         return True
 
     def action_submit(self):
@@ -159,26 +172,36 @@ class FleetflowCredential(models.Model):
 
     def action_reject(self):
         self._require_compliance()
-        self.with_context(ff_credential_action=True).write({
+        self._apply({
             "state": "rejected", "verified_by": self.env.uid, "verified_on": fields.Datetime.now(),
         })
         return True
 
     def action_supersede(self, new_vals):
-        """Create a renewal that supersedes this verified document, retaining history."""
+        """Stage a renewal that will supersede this verified document once the
+        renewal is itself verified.
+
+        The old, still-valid evidence remains effective until the renewal is
+        verified (see action_verify). Drafting a renewal therefore never drops
+        coverage. A renewal must keep the same subject and document kind as its
+        predecessor -- caller-supplied subject/kind cannot redirect it.
+        """
         self.ensure_one()
         self._require_compliance()
+        if self.state != "verified":
+            raise UserError(_("Only verified evidence can be superseded (%s).") % self.name)
         vals = dict(new_vals)
-        vals.setdefault("doc_kind", self.doc_kind)
-        vals.setdefault("company_id", self.company_id.id)
+        # Enforce subject/kind continuity: the renewal is bound to this record's
+        # subject, whatever the caller passed.
+        vals["doc_kind"] = self.doc_kind
+        vals["company_id"] = self.company_id.id
         for fname in ("operator_company_id", "vehicle_id", "driver_id"):
-            if self[fname]:
-                vals.setdefault(fname, self[fname].id)
+            vals.pop(fname, None)
+        subject_field = {"operator": "operator_company_id", "vehicle": "vehicle_id",
+                         "driver": "driver_id"}[self.subject_kind]
+        vals[subject_field] = self[subject_field].id
         renewal = self.create(vals)
-        renewal.with_context(ff_credential_action=True).write({"supersedes_id": self.id})
-        self.with_context(ff_credential_action=True).write({
-            "state": "superseded", "superseded_by_id": renewal.id,
-        })
+        renewal._apply({"supersedes_id": self.id})
         return renewal
 
     # ------------------------------------------------------------------

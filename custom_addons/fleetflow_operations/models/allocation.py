@@ -75,6 +75,11 @@ class FleetflowAllocation(models.Model):
     # never by a direct write/import/default context.
     _PROTECTED = {"state", "custody_out_at", "custody_in_at", "confirmed_by",
                   "readiness_status", "readiness_snapshot", "readiness_version"}
+    # The plan (resources + interval) is locked once the allocation leaves draft;
+    # a change then requires the audited amendment path, which re-locks resources
+    # and re-evaluates readiness and conflicts.
+    _PLANNING = {"vehicle_id", "driver_id", "operating_mode", "planned_start",
+                 "planned_end", "channel_enrolment_ids"}
 
     @api.constrains("planned_start", "planned_end")
     def _check_interval(self):
@@ -83,17 +88,46 @@ class FleetflowAllocation(models.Model):
                 raise ValidationError(_("Planned end must be after planned start (half-open interval)."))
 
     def write(self, vals):
-        if not self.env.context.get("ff_alloc_action"):
-            forbidden = self._PROTECTED & set(vals)
-            if forbidden and vals.get("state") != "draft":
-                raise AccessError(_(
-                    "Allocation state and custody are changed through the workflow "
-                    "actions (confirm/checkout/return/cancel), not by direct edits."
-                ))
+        # There is NO context flag that opts out of these guards. Protected
+        # lifecycle/custody/readiness fields move only through the workflow
+        # actions, which write at the ORM level via _apply(). A public write --
+        # from the form, an import, a copy or a forged RPC context -- can never
+        # set them, not even alongside state='draft'.
+        forbidden = self._PROTECTED & set(vals)
+        if forbidden:
+            raise AccessError(_(
+                "Allocation state, custody and readiness are set by the workflow "
+                "actions (confirm/checkout/return/cancel), not by direct edits."))
+        # Once confirmed/checked-out/returned/cancelled, the plan is frozen.
+        if self._PLANNING & set(vals):
+            for rec in self:
+                if rec.state != "draft":
+                    raise AccessError(_(
+                        "The plan of allocation %s is locked in state '%s'. Use "
+                        "Reschedule to amend it (which re-checks readiness and "
+                        "conflicts), or cancel and plan a new one."
+                    ) % (rec.name, rec.state))
         return super().write(vals)
 
+    def unlink(self):
+        # Only genuine unused drafts are deletable by an ordinary user; a
+        # confirmed/checked-out/returned allocation carries reservation and
+        # custody history that must be cancelled, not erased. Superuser/admin
+        # maintenance (migrations, test teardown) is exempt.
+        if not self.env.su:
+            for rec in self:
+                if rec.state != "draft":
+                    raise UserError(_(
+                        "Only a draft allocation can be deleted. Cancel a confirmed "
+                        "allocation instead; checked-out/returned custody is retained "
+                        "for audit (%s is '%s').") % (rec.name, rec.state))
+        return super().unlink()
+
     def _apply(self, vals):
-        return super(FleetflowAllocation, self.with_context(ff_alloc_action=True)).write(vals)
+        # Internal transition: bypass the public write guard by writing at the
+        # ORM level. The only callers are the workflow actions below, which have
+        # already checked role, source state, resource conflicts and readiness.
+        return super().write(vals)
 
     # ------------------------------------------------------------------
     # Concurrency-safe transitions

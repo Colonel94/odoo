@@ -87,10 +87,10 @@ def seed(env):
         "require_driver_licence": True, "require_professional_permit": True,
         "require_channel_approval": True, "enforce_end_of_use": False})
     profile.action_publish()
-    env["fleetflow.operating.authorization"].create({
+    permit = env["fleetflow.operating.authorization"].create({
         "name": MARK + " permit", "company_id": company.id, "operating_mode": "chauffeur",
-        "date_start": date.today() - timedelta(days=30), "date_end": date.today() + timedelta(days=300),
-        "state": "verified"}).write({"verified_on": fields.Datetime.now()})
+        "date_start": date.today() - timedelta(days=30), "date_end": date.today() + timedelta(days=300)})
+    permit.action_verify()  # server-side verification with attribution
 
     today = date.today()
     far = today + timedelta(days=300)
@@ -106,8 +106,8 @@ def seed(env):
     _cred(env, company, "driver_licence", "driver_id", da, today - timedelta(days=30), far)
     _cred(env, company, "professional_permit", "driver_id", da, today - timedelta(days=30), far)
     enr_a = env["fleetflow.channel.enrolment"].create({
-        "company_id": company.id, "channel": "uber", "product": "UberX", "driver_id": da.id,
-        "state": "approved", "verified_as_of": fields.Datetime.now()})
+        "company_id": company.id, "channel": "uber", "product": "UberX", "driver_id": da.id})
+    enr_a.action_approve()  # approval is reviewer-set, not a create-time value
     s, e = shift(va, da)
     env["fleetflow.allocation"].create({
         "name": MARK + " A-ready", "company_id": company.id, "operating_mode": "chauffeur",
@@ -121,8 +121,8 @@ def seed(env):
     _cred(env, company, "driver_licence", "driver_id", db, today - timedelta(days=30), far)
     _cred(env, company, "professional_permit", "driver_id", db, today - timedelta(days=30), far)
     enr_b = env["fleetflow.channel.enrolment"].create({
-        "company_id": company.id, "channel": "uber", "product": "UberX", "driver_id": db.id,
-        "state": "approved", "verified_as_of": fields.Datetime.now()})
+        "company_id": company.id, "channel": "uber", "product": "UberX", "driver_id": db.id})
+    enr_b.action_approve()
     s, e = shift(vb, db, (10, 18))
     env["fleetflow.allocation"].create({
         "name": MARK + " B-blocked", "company_id": company.id, "operating_mode": "chauffeur",
@@ -136,8 +136,8 @@ def seed(env):
     for k in ("driver_licence", "professional_permit"):
         _cred(env, company, k, "driver_id", dc, today - timedelta(days=30), far)
     env["fleetflow.channel.enrolment"].create({
-        "company_id": company.id, "channel": "uber", "product": "UberX", "driver_id": dc.id,
-        "state": "approved", "verified_as_of": fields.Datetime.now()})
+        "company_id": company.id, "channel": "uber", "product": "UberX", "driver_id": dc.id
+    }).action_approve()
     env["fleetflow.vehicle.hold"].create({
         "vehicle_id": vc.id, "hold_type": "safety", "reason": MARK + " brake inspection required",
         "dispatch_blocking": True})

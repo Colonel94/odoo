@@ -75,10 +75,17 @@ class OperationsCase(TransactionCase):
     def make_channel(self, channel, product, subject_field, subject, state="approved", fresh=True):
         enr = self.env["fleetflow.channel.enrolment"].create({
             "company_id": self.company.id, "channel": channel, "product": product,
-            subject_field: subject.id, "state": state,
+            subject_field: subject.id,
         })
-        if state == "approved" and fresh:
-            enr.verified_as_of = fields.Datetime.now()
+        # Approval status is reviewer-set; go through the compliance actions.
+        if state == "approved":
+            enr.with_user(self.compliance).action_approve()
+            if not fresh:
+                enr._apply({"verified_as_of": fields.Datetime.now() - timedelta(days=400)})
+        elif state == "suspended":
+            enr.with_user(self.compliance).action_suspend()
+        elif state == "rejected":
+            enr.with_user(self.compliance).action_reject()
         return enr
 
     def interval(self, start_hour=8, end_hour=18, days_ahead=1):
@@ -91,9 +98,8 @@ class OperationsCase(TransactionCase):
 
     def ready_chauffeur_setup(self):
         """A fully-eligible chauffeur setup; individual tests then break one thing."""
-        self.vehicle.write({
-            "ff_operator_company_id": self.company.id, "ff_operational_state": "reviewed",
-        })
+        self.vehicle.write({"ff_operator_company_id": self.company.id})
+        self.vehicle.with_user(self.compliance).ff_mark_reviewed()
         self.publish_profile(
             "chauffeur", require_operating_authorization=True, require_vehicle_registration=True,
             require_insurance=True, require_driver_licence=True, require_professional_permit=True,

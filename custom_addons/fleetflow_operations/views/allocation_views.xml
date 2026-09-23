@@ -36,8 +36,8 @@
                             <field name="company_id" invisible="1"/>
                         </group>
                         <group string="Interval &amp; readiness">
-                            <field name="planned_start" attrs="{'readonly': [('state', 'not in', ['draft', 'confirmed'])]}"/>
-                            <field name="planned_end" attrs="{'readonly': [('state', 'not in', ['draft', 'confirmed'])]}"/>
+                            <field name="planned_start" attrs="{'readonly': [('state', '!=', 'draft')]}"/>
+                            <field name="planned_end" attrs="{'readonly': [('state', '!=', 'draft')]}"/>
                             <field name="readiness_status" widget="badge"
                                    decoration-success="readiness_status == 'ready'"
                                    decoration-warning="readiness_status == 'warning'"
