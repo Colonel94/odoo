@@ -14,6 +14,9 @@
                             confirm="Confirm this reservation? Readiness is re-checked and the vehicle/driver are reserved."/>
                     <button name="action_checkout" type="object" string="Check out" class="oe_highlight"
                             attrs="{'invisible': [('state', '!=', 'confirmed')]}"/>
+                    <button name="action_reschedule" type="object" string="Reschedule"
+                            attrs="{'invisible': [('state', '!=', 'confirmed')]}"
+                            confirm="Amend this confirmed plan? Readiness and conflicts are re-checked against the new interval."/>
                     <button name="action_return" type="object" string="Record return" class="oe_highlight"
                             attrs="{'invisible': [('state', '!=', 'checked_out')]}"/>
                     <button name="action_cancel" type="object" string="Cancel"
@@ -42,7 +45,17 @@
                                    decoration-success="readiness_status == 'ready'"
                                    decoration-warning="readiness_status == 'warning'"
                                    decoration-danger="readiness_status in ['blocked', 'needs_review']"/>
+                            <field name="acknowledge_warnings"
+                                   attrs="{'invisible': [('state', 'not in', ['draft', 'confirmed'])]}"/>
                             <field name="confirmed_by" readonly="1"/>
+                            <label for="amend_planned_start" string="Amend to"
+                                   attrs="{'invisible': [('state', '!=', 'confirmed')]}"/>
+                            <div attrs="{'invisible': [('state', '!=', 'confirmed')]}">
+                                <field name="amend_planned_start" class="oe_inline" nolabel="1"/>
+                                <span class="mx-2">→</span>
+                                <field name="amend_planned_end" class="oe_inline" nolabel="1"/>
+                                <p class="text-muted">Set a new interval, then use Reschedule.</p>
+                            </div>
                         </group>
                     </group>
                     <notebook>

@@ -58,6 +58,18 @@ class FleetflowAllocation(models.Model):
     return_condition = fields.Text(copy=False)
     return_defect = fields.Boolean(copy=False)
 
+    # Amendment inputs (consumed by the guarded Reschedule action, then cleared).
+    amend_planned_start = fields.Datetime(copy=False)
+    amend_planned_end = fields.Datetime(copy=False)
+
+    # Explicit acknowledgement of non-blocking warnings (recorded on the decision).
+    acknowledge_warnings = fields.Boolean(
+        copy=False,
+        help="Tick to proceed despite non-blocking warnings; recorded against "
+             "the decision. It never overrides a Blocked or Needs-review verdict.")
+    warnings_ack_by = fields.Many2one("res.users", readonly=True, copy=False)
+    warnings_ack_on = fields.Datetime(readonly=True, copy=False)
+
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
@@ -74,7 +86,8 @@ class FleetflowAllocation(models.Model):
     # State/custody/readiness are advanced ONLY through the workflow actions,
     # never by a direct write/import/default context.
     _PROTECTED = {"state", "custody_out_at", "custody_in_at", "confirmed_by",
-                  "readiness_status", "readiness_snapshot", "readiness_version"}
+                  "readiness_status", "readiness_snapshot", "readiness_version",
+                  "warnings_ack_by", "warnings_ack_on"}
     # The plan (resources + interval) is locked once the allocation leaves draft;
     # a change then requires the audited amendment path, which re-locks resources
     # and re-evaluates readiness and conflicts.
@@ -148,9 +161,14 @@ class FleetflowAllocation(models.Model):
         conflict and reports it cleanly). Vehicles are locked before drivers, in
         id order, so two transactions cannot deadlock.
         """
+        self._lock_ids(self.mapped("vehicle_id").ids, self.mapped("driver_id").ids)
+
+    def _lock_ids(self, vehicle_ids, driver_ids):
+        """Bump the lock counter on specific vehicle/driver rows (vehicles first,
+        both in id order) so competing transactions serialise deterministically."""
         self.flush_recordset()
-        vehicle_ids = tuple(sorted(set(self.mapped("vehicle_id").ids)))
-        driver_ids = tuple(sorted(set(self.mapped("driver_id").ids)))
+        vehicle_ids = tuple(sorted(set(vehicle_ids)))
+        driver_ids = tuple(sorted(set(driver_ids)))
         if vehicle_ids:
             self.env.cr.execute(
                 "UPDATE fleet_vehicle SET ff_alloc_lock = COALESCE(ff_alloc_lock, 0) + 1 "
@@ -193,17 +211,45 @@ class FleetflowAllocation(models.Model):
         self.ensure_one()
         return list({(e.channel, e.product) for e in self.channel_enrolment_ids})
 
-    def _evaluate(self):
+    def _evaluate(self, start=None, end=None):
+        """Evaluate readiness over an interval (defaults to the planned one).
+
+        Checkout passes the ACTUAL handover window [now, planned_end] so that a
+        stale document is caught and future-dated evidence cannot be relied on;
+        confirm uses the planned interval."""
         self.ensure_one()
         return self.env["fleetflow.readiness"].evaluate_readiness(
             self.company_id, self.vehicle_id, self.driver_id, self.operating_mode,
-            self._requested_channel_products(), self.planned_start, self.planned_end)
+            self._requested_channel_products(),
+            start or self.planned_start, end or self.planned_end)
 
-    def action_confirm(self):
+    def _decision_vals(self, result):
+        return {
+            "readiness_status": result["status"],
+            "readiness_snapshot": json.dumps(result, default=str),
+            "readiness_version": result.get("profile") and str(result["profile"].get("version")),
+        }
+
+    def _require_ack(self, result, acknowledge):
+        """A non-blocking WARNING may proceed only with an explicit acknowledgement,
+        recorded against the decision. It can never override Blocked or Needs
+        review (those already fail can_confirm and are rejected before this)."""
+        self.ensure_one()
+        if not result.get("requires_ack"):
+            return {}
+        if not acknowledge:
+            warns = [r["message"] for r in result["reasons"] if r["status"] == constants.WARNING]
+            raise UserError(_(
+                "This allocation has non-blocking warning(s). Acknowledge them to "
+                "proceed:\n- %s") % "\n- ".join(warns))
+        return {"warnings_ack_by": self.env.uid, "warnings_ack_on": fields.Datetime.now()}
+
+    def action_confirm(self, acknowledge=None):
         self.ensure_one()
         self._require_dispatcher()
         if self.state != "draft":
             raise UserError(_("Only a draft allocation can be confirmed."))
+        acknowledge = self.acknowledge_warnings if acknowledge is None else acknowledge
         self._lock_resources()
         result = self._evaluate()
         if not result["can_confirm"]:
@@ -212,23 +258,38 @@ class FleetflowAllocation(models.Model):
         if conflicts:
             raise UserError(_("The vehicle or driver is already reserved for an overlapping interval (%s).")
                             % ", ".join(conflicts.mapped("name")))
-        self._apply({
-            "state": "confirmed", "confirmed_by": self.env.uid,
-            "readiness_status": result["status"],
-            "readiness_snapshot": json.dumps(result, default=str),
-            "readiness_version": result.get("profile") and str(result["profile"].get("version")),
-        })
-        self.message_post(body=_("Confirmed. Readiness: %s.") % result["status"])
+        ack_vals = self._require_ack(result, acknowledge)
+        self._apply({"state": "confirmed", "confirmed_by": self.env.uid,
+                     **self._decision_vals(result), **ack_vals})
+        self.message_post(body=_("Confirmed. Readiness: %s.%s") % (
+            result["status"], _(" Warnings acknowledged.") if ack_vals else ""))
         return True
 
-    def action_checkout(self, odometer=None):
+    def action_checkout(self, odometer=None, acknowledge=None):
         self.ensure_one()
         self._require_dispatcher()
         if self.state != "confirmed":
             raise UserError(_("Only a confirmed allocation can be checked out."))
+        # OPS-1 offers rental CAPACITY blocking only; a physical rental handover
+        # needs renter/contract controls that are not part of this increment.
+        if self.operating_mode == "rental":
+            raise UserError(_(
+                "Physical rental checkout is not available in OPS-1 (rental "
+                "allocations block capacity only)."))
+        acknowledge = self.acknowledge_warnings if acknowledge is None else acknowledge
+        now = fields.Datetime.now()
+        # Server time is authoritative and the handover must fall inside the
+        # approved reservation window: a handover after planned_end would validate
+        # a window that has already passed -- reschedule instead.
+        if now >= self.planned_end:
+            raise UserError(_(
+                "The reservation window ended at %s (server time). Reschedule the "
+                "allocation before checking out.") % self.planned_end)
         self._lock_resources()
-        # Fresh readiness at the moment of custody handover (no stale snapshot).
-        result = self._evaluate()
+        # Fresh readiness over the ACTUAL handover window [now, planned_end], not
+        # the planned start: a document expired by now blocks, and evidence not
+        # yet effective cannot be relied on for an early handover.
+        result = self._evaluate(start=now, end=self.planned_end)
         if not result["can_confirm"]:
             raise UserError(_("Readiness changed; cannot check out:\n- %s")
                             % "\n- ".join(result["next_actions"]))
@@ -242,13 +303,15 @@ class FleetflowAllocation(models.Model):
         if conflicts:
             raise UserError(_("Cannot check out: resource busy or not returned (%s).")
                             % ", ".join(conflicts.mapped("name")))
-        vals = {"state": "checked_out", "custody_out_at": fields.Datetime.now()}
+        ack_vals = self._require_ack(result, acknowledge)
+        vals = {"state": "checked_out", "custody_out_at": now, **ack_vals}
         odometer = self.checkout_odometer if odometer is None else odometer
         if odometer:
             self._validate_odometer(odometer)
             vals["checkout_odometer"] = odometer
         self._apply(vals)
-        self.message_post(body=_("Checked out."))
+        self.message_post(body=_("Checked out.%s") % (
+            _(" Warnings acknowledged.") if ack_vals else ""))
         return True
 
     def action_return(self, odometer=None, fuel=None, condition=None, defect=None):
@@ -279,6 +342,102 @@ class FleetflowAllocation(models.Model):
         if self.state not in ("draft", "confirmed"):
             raise UserError(_("Only a draft or confirmed allocation can be cancelled (not after checkout)."))
         self._apply({"state": "cancelled"})
+        return True
+
+    # ------------------------------------------------------------------
+    # Guarded amendment (the sanctioned way to change a confirmed plan)
+    # ------------------------------------------------------------------
+    def _amend_vals(self):
+        self.ensure_one()
+        vals = {}
+        if self.amend_planned_start:
+            vals["planned_start"] = self.amend_planned_start
+        if self.amend_planned_end:
+            vals["planned_end"] = self.amend_planned_end
+        return vals
+
+    @staticmethod
+    def _m2m_ids(commands):
+        """Resolve an id list from an x2many (6,0,ids) command or a plain list."""
+        if commands and isinstance(commands[0], (list, tuple)):
+            for cmd in commands:
+                if cmd and cmd[0] == 6:
+                    return list(cmd[2])
+            return []
+        return list(commands or [])
+
+    def _prospective_conflicts(self, vehicle, driver, start, end):
+        self.ensure_one()
+        subject = ["|", ("vehicle_id", "=", vehicle.id)]
+        subject.append(("driver_id", "=", driver.id) if driver else ("id", "=", 0))
+        domain = [("id", "!=", self.id), ("state", "in", list(ACTIVE_STATES))] + subject + [
+            ("planned_start", "<", end), ("planned_end", ">", start)]
+        return self.env["fleetflow.allocation"].search(domain)
+
+    def action_reschedule(self, vals=None, acknowledge=None):
+        """Guarded amendment of a CONFIRMED allocation's plan.
+
+        Locks the old and new resources, re-evaluates readiness and conflicts on
+        the PROSPECTIVE values (nothing is written until they pass, so a rejected
+        amendment leaves the record untouched), preserves the previous decision in
+        the chatter and records the new one. A checked-out allocation is checked
+        in, not rescheduled.
+        """
+        self.ensure_one()
+        self._require_dispatcher()
+        if self.state != "confirmed":
+            raise UserError(_(
+                "Only a confirmed allocation can be rescheduled (check it in or "
+                "cancel first)."))
+        vals = self._amend_vals() if vals is None else dict(vals)
+        vals = {k: v for k, v in vals.items() if k in self._PLANNING}
+        if not vals:
+            raise UserError(_("Enter a new interval or resource to reschedule."))
+        acknowledge = self.acknowledge_warnings if acknowledge is None else acknowledge
+
+        # Prospective values -- not written yet.
+        new_start = vals.get("planned_start", self.planned_start)
+        new_end = vals.get("planned_end", self.planned_end)
+        new_mode = vals.get("operating_mode", self.operating_mode)
+        new_vehicle = (self.env["fleet.vehicle"].browse(vals["vehicle_id"])
+                       if "vehicle_id" in vals else self.vehicle_id)
+        if "driver_id" in vals:
+            new_driver = (self.env["fleetflow.driver"].browse(vals["driver_id"])
+                          if vals["driver_id"] else self.env["fleetflow.driver"])
+        else:
+            new_driver = self.driver_id
+        if new_end <= new_start:
+            raise ValidationError(_("Planned end must be after planned start."))
+
+        # Lock the current AND the prospective resources before re-checking.
+        self._lock_ids([self.vehicle_id.id, new_vehicle.id],
+                       list(filter(None, [self.driver_id.id, new_driver.id])))
+
+        if "channel_enrolment_ids" in vals:
+            enrolments = self.env["fleetflow.channel.enrolment"].browse(
+                self._m2m_ids(vals["channel_enrolment_ids"]))
+            products = list({(e.channel, e.product) for e in enrolments})
+        else:
+            products = self._requested_channel_products()
+
+        result = self.env["fleetflow.readiness"].evaluate_readiness(
+            self.company_id, new_vehicle, new_driver, new_mode, products, new_start, new_end)
+        if not result["can_confirm"]:
+            raise UserError(_("The amended plan is not ready:\n- %s")
+                            % "\n- ".join(result["next_actions"]))
+        conflicts = self._prospective_conflicts(new_vehicle, new_driver, new_start, new_end)
+        if conflicts:
+            raise UserError(_("The amended plan conflicts with an existing reservation (%s).")
+                            % ", ".join(conflicts.mapped("name")))
+        ack_vals = self._require_ack(result, acknowledge)
+
+        # Preserve the previous decision, then apply the new plan + decision.
+        self.message_post(body=_(
+            "Amended. Previous plan: %s -> %s (readiness %s, version %s).") % (
+            self.planned_start, self.planned_end, self.readiness_status, self.readiness_version))
+        self._apply({**vals, **self._decision_vals(result), **ack_vals,
+                     "amend_planned_start": False, "amend_planned_end": False})
+        self.message_post(body=_("Rescheduled. Readiness: %s.") % result["status"])
         return True
 
     def action_check_readiness(self):
