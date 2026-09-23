@@ -37,7 +37,11 @@ class FleetflowCredential(models.Model):
     )
 
     issuer = fields.Char()
-    reference = fields.Char(string="Document number")
+    # Sensitive document detail is readable only by the review roles, not by a
+    # dispatcher who legitimately sees non-sensitive readiness metadata.
+    reference = fields.Char(
+        string="Document number",
+        groups="fleetflow_operations.group_ops_compliance,fleetflow_operations.group_ops_fleet_manager")
     date_start = fields.Date(string="Valid from")
     date_end = fields.Date(string="Valid until")
     date_precision = fields.Selection(constants.DATE_PRECISION, default="day")
@@ -60,7 +64,8 @@ class FleetflowCredential(models.Model):
     )
     superseded_by_id = fields.Many2one("fleetflow.credential", string="Superseded by", readonly=True, copy=False)
     supersedes_id = fields.Many2one("fleetflow.credential", string="Supersedes", readonly=True, copy=False)
-    note = fields.Text()
+    note = fields.Text(
+        groups="fleetflow_operations.group_ops_compliance,fleetflow_operations.group_ops_fleet_manager")
 
     # Fields that may never be forged through create/write/import/context.
     _PROTECTED = {"verified_by", "verified_on", "superseded_by_id", "supersedes_id"}
@@ -117,7 +122,9 @@ class FleetflowCredential(models.Model):
             if vals.get("state") not in ("draft", "pending"):
                 vals["state"] = "draft"
             clean.append(vals)
-        return super().create(clean)
+        records = super().create(clean)
+        records._bind_attachment()
+        return records
 
     def write(self, vals):
         # No context flag opts out of these guards. The verified/rejected/
@@ -143,12 +150,26 @@ class FleetflowCredential(models.Model):
                         "Verified evidence %s is locked. Supersede it with a renewal "
                         "instead of editing it."
                     ) % rec.name)
-        return super().write(vals)
+        res = super().write(vals)
+        if "attachment_id" in vals:
+            self._bind_attachment()
+        return res
 
     def _apply(self, vals):
         # Internal transition used by the review actions; bypasses the public
         # write guard by writing at the ORM level.
         return super().write(vals)
+
+    def _bind_attachment(self):
+        """Bind a linked document file to THIS credential and make it private, so
+        the compliance-only file restriction (ir.attachment.check) actually
+        applies. A file referenced through attachment_id can therefore never be a
+        loose, public or foreign-owned attachment that side-steps the guard."""
+        for rec in self:
+            if rec.attachment_id:
+                rec.attachment_id.sudo().write({
+                    "res_model": rec._name, "res_id": rec.id, "public": False})
+        return True
 
     def _require_compliance(self):
         if not (self.env.user.has_group("fleetflow_operations.group_ops_compliance") or self.env.su):

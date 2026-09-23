@@ -30,6 +30,7 @@ class FleetflowVehicleHold(models.Model):
     )
     reason = fields.Text(required=True)
     source_work_order_id = fields.Many2one("fleetflow.order", string="Source work order")
+    source_allocation_id = fields.Many2one("fleetflow.allocation", string="Source allocation")
     reference = fields.Char(string="External reference")
     dispatch_blocking = fields.Boolean(
         default=True, tracking=True,

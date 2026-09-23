@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+import math
 
 from odoo import api, fields, models, _
 from odoo.exceptions import AccessError, UserError, ValidationError
@@ -320,7 +321,9 @@ class FleetflowAllocation(models.Model):
         defect = self.return_defect if defect is None else bool(defect)
         vals = {"state": "returned", "custody_in_at": fields.Datetime.now(),
                 "return_fuel": fuel, "return_condition": condition, "return_defect": defect}
-        if odometer:
+        # Validate whenever a reading is present (including 0), so a zero return
+        # cannot bypass the decreasing-reading check.
+        if odometer is not None:
             self._validate_odometer(odometer, is_return=True)
             vals["return_odometer"] = odometer
         self._apply(vals)
@@ -457,30 +460,56 @@ class FleetflowAllocation(models.Model):
         self.ensure_one()
         if value is None:
             return
-        if value < 0 or value != value:  # negative or NaN
-            raise ValidationError(_("Odometer reading must be a non-negative number."))
+        if math.isnan(value) or math.isinf(value):
+            raise ValidationError(_("Odometer reading must be a finite number."))
+        if value < 0:
+            raise ValidationError(_("Odometer reading must be non-negative."))
         if is_return and self.checkout_odometer and value < self.checkout_odometer:
             # A decrease needs a reviewed correction/meter-change path, not silent
-            # acceptance.
+            # acceptance (a zero return no longer slips past this).
             raise ValidationError(_(
                 "Return odometer (%s) is below checkout (%s). A decrease requires "
                 "a reviewed meter-change correction.") % (value, self.checkout_odometer))
+        # Reconcile against the last accepted reading for this vehicle across
+        # allocations (same unit); the meter cannot go backwards between custodies.
+        last = self._last_accepted_odometer()
+        if last is not None and value < last:
+            raise ValidationError(_(
+                "Odometer reading (%s %s) is below the last accepted reading (%s) "
+                "for this vehicle. A decrease requires a reviewed meter-change "
+                "correction.") % (value, self.odometer_unit, last))
+
+    def _last_accepted_odometer(self):
+        """Highest accepted reading recorded for this vehicle on other allocations
+        in the same unit (returns are preferred, then checkouts)."""
+        self.ensure_one()
+        others = self.search([
+            ("vehicle_id", "=", self.vehicle_id.id), ("id", "!=", self.id),
+            ("odometer_unit", "=", self.odometer_unit)])
+        readings = [r for r in (others.mapped("return_odometer")
+                                + others.mapped("checkout_odometer")) if r]
+        return max(readings) if readings else None
 
     def _raise_defect_hold(self, note):
-        """A serious reported defect creates a safety hold and a work order."""
+        """A serious reported defect creates a linked chain: this allocation ->
+        the defect -> a work order -> a specific safety hold, so the operator can
+        follow custody through to repair and clearance."""
         self.ensure_one()
-        self.env["fleetflow.vehicle.hold"].sudo().create({
-            "vehicle_id": self.vehicle_id.id, "hold_type": "safety",
-            "reason": _("Defect reported on return of %s: %s") % (self.name, note or _("(no note)")),
-            "dispatch_blocking": True,
-        })
-        # Create a linked FleetFlow work order through the normal model.
-        self.env["fleetflow.order"].sudo().create({
+        # Create the work order first, then the hold that references it, so the
+        # source-to-repair-to-clearance chain is complete and attributable.
+        order = self.env["fleetflow.order"].sudo().create({
             "title": _("Defect reported on return: %s") % self.name,
             "description": note or "",
             "vehicle_id": self._fleetflow_order_vehicle(),
             "company_id": self.company_id.id,
             "priority": "3",
+        })
+        self.env["fleetflow.vehicle.hold"].sudo().create({
+            "vehicle_id": self.vehicle_id.id, "hold_type": "safety",
+            "reason": _("Defect reported on return of %s: %s") % (self.name, note or _("(no note)")),
+            "dispatch_blocking": True,
+            "source_work_order_id": order.id,
+            "source_allocation_id": self.id,
         })
 
     def _fleetflow_order_vehicle(self):
