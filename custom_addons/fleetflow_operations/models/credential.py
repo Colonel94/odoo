@@ -41,6 +41,10 @@ class FleetflowCredential(models.Model):
     date_start = fields.Date(string="Valid from")
     date_end = fields.Date(string="Valid until")
     date_precision = fields.Selection(constants.DATE_PRECISION, default="day")
+    open_ended = fields.Boolean(
+        string="Reviewed non-expiring",
+        help="A reviewer has confirmed this evidence genuinely has no expiry. A "
+             "blank 'valid until' is NOT the same as this: it is unknown validity.")
 
     state = fields.Selection(
         [("draft", "Draft"), ("pending", "Pending verification"),
@@ -130,7 +134,8 @@ class FleetflowCredential(models.Model):
             ))
         # A verified document is immutable except through supersession.
         frozen = {"doc_kind", "operator_company_id", "vehicle_id", "driver_id",
-                  "date_start", "date_end", "reference", "issuer", "attachment_id"}
+                  "date_start", "date_end", "date_precision", "open_ended",
+                  "reference", "issuer", "attachment_id"}
         if frozen & set(vals):
             for rec in self:
                 if rec.state in ("verified", "superseded"):
@@ -217,24 +222,40 @@ class FleetflowCredential(models.Model):
         from datetime import datetime, time
         return tz.localize(datetime.combine(day, time.min))
 
-    def _covers_interval(self, start_dt, end_dt, tz):
-        """True if this evidence is verified and valid for the WHOLE [start,end).
+    def _validity(self, start_dt, end_dt, tz):
+        """Classify this evidence over [start, end) as one of:
 
-        Date-only validity uses a local-day boundary: 'valid until D' means valid
-        through the end of day D in the operator's timezone, never an accidental
-        UTC midnight. A missing bound is treated as open on that side.
+        - 'not_verified': not in the verified state.
+        - 'unknown'     : validity cannot be trusted -- a blank 'valid until' that
+                          is not a reviewed non-expiring, or an imprecise date
+                          (year/month/unknown precision). Blank != unlimited.
+        - 'expired'     : verified with a real bound the interval falls outside.
+        - 'covers'      : verified and valid for the whole interval.
+
+        Date-only validity uses a local-day boundary in the operator's timezone
+        ('valid until D' = through the end of day D), never an accidental UTC
+        midnight.
         """
         self.ensure_one()
         if self.state != "verified":
-            return False
+            return "not_verified"
+        # An imprecise date cannot be trusted to a day-accurate boundary.
+        if self.date_precision in ("year", "month", "unknown"):
+            return "unknown"
         from datetime import timedelta
         if self.date_start and start_dt < self._local_midnight(self.date_start, tz):
-            return False
+            return "expired"  # not yet effective for the whole interval
         if self.date_end:
-            # End of local day date_end (exclusive upper boundary = next midnight).
             if end_dt > self._local_midnight(self.date_end + timedelta(days=1), tz):
-                return False
-        return True
+                return "expired"
+            return "covers"
+        # No 'valid until': only a reviewed non-expiring counts; a blank does not.
+        return "covers" if self.open_ended else "unknown"
+
+    def _covers_interval(self, start_dt, end_dt, tz):
+        """True if verified and valid for the WHOLE [start, end)."""
+        self.ensure_one()
+        return self._validity(start_dt, end_dt, tz) == "covers"
 
     def _expires_after(self, at_dt, tz):
         """True if a valid-until exists and falls after `at_dt` (a later renewal)."""

@@ -144,7 +144,8 @@ class TestReadiness(OperationsCase):
             require_insurance=True, require_driver_licence=True, require_professional_permit=True,
             require_channel_approval=True, enforce_end_of_use=True,
         )
-        self.vehicle.ff_authorized_end_of_use = date.today() - timedelta(days=1)
+        self.vehicle.with_user(self.compliance).ff_review_end_of_use(
+            authorized_end_of_use=date.today() - timedelta(days=1))
         result = self.evaluate(user=self.dispatcher)
         self.assertEqual(result["status"], constants.BLOCKED)
         self.assertIn("end_of_use_exceeded", self._codes(result))

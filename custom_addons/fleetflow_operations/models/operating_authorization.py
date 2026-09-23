@@ -38,6 +38,10 @@ class FleetflowOperatingAuthorization(models.Model):
     activity = fields.Char(string="Licensed activity")
     date_start = fields.Date(string="Valid from")
     date_end = fields.Date(string="Valid until")
+    open_ended = fields.Boolean(
+        string="Reviewed non-expiring",
+        help="A reviewer has confirmed this permit genuinely has no expiry. A "
+             "blank 'valid until' is NOT the same: it is unknown validity.")
     state = fields.Selection(
         [("draft", "Draft"), ("pending", "Pending verification"),
          ("verified", "Verified"), ("rejected", "Rejected"), ("expired", "Expired")],
@@ -54,7 +58,7 @@ class FleetflowOperatingAuthorization(models.Model):
     # actions; a direct write (even by a compliance user) cannot forge them, and
     # a verified permit's scope/dates are frozen (corrections re-verify).
     _PROTECTED = {"verified_by", "verified_on"}
-    _FROZEN = {"operating_mode", "jurisdiction", "activity", "date_start", "date_end"}
+    _FROZEN = {"operating_mode", "jurisdiction", "activity", "date_start", "date_end", "open_ended"}
 
     @api.constrains("date_start", "date_end")
     def _check_dates(self):

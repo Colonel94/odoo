@@ -91,7 +91,8 @@ class FleetflowReadiness(models.AbstractModel):
             if code not in required:
                 continue
             if code == "operating_authorization":
-                reasons.append(self._check_operating_authorization(company, operating_mode, start, end, tz))
+                reasons.append(self._check_operating_authorization(
+                    company, operating_mode, start, end, tz, city))
                 continue
             subject_field, subject, doc_kind = spec
             if not subject:
@@ -175,47 +176,74 @@ class FleetflowReadiness(models.AbstractModel):
                                     _("Driver %s is marked unavailable.") % driver.name))
         return out or [self._reason("driver", constants.READY, "driver_ok", _("Driver is active and employed here."))]
 
-    def _check_operating_authorization(self, company, operating_mode, start, end, tz):
+    def _check_operating_authorization(self, company, operating_mode, start, end, tz, city):
+        # The permit must match the operating jurisdiction (city), not just the
+        # company and mode.
         auths = self.env["fleetflow.operating.authorization"].search([
             ("company_id", "=", company.id), ("operating_mode", "=", operating_mode),
+            ("jurisdiction", "=", city),
         ])
         verified = auths.filtered(lambda a: a.state == "verified")
-        # Whole-interval coverage using local-day boundaries.
-        covering = verified.filtered(
-            lambda a: (not a.date_start or start >= self._doc_start(a.date_start, tz))
-            and (not a.date_end or end <= self._doc_end(a.date_end, tz)))
+        covering = verified.filtered(lambda a: self._auth_covers(a, start, end, tz))
         if covering:
             return self._reason("operating_authorization", constants.READY, "permit_ok",
-                                _("Operating permit valid for the interval."))
-        if verified:
+                                _("Operating permit valid for the interval and jurisdiction."))
+        # A verified permit with no end date (and not a reviewed non-expiring) has
+        # unknown validity -- never treated as unlimited.
+        unbounded = verified.filtered(lambda a: not a.date_end and not a.open_ended)
+        expired = verified - covering - unbounded
+        if expired:
             return self._reason("operating_authorization", constants.BLOCKED, "permit_expired",
                                 _("The operating permit does not cover the whole interval."))
+        if unbounded:
+            return self._reason("operating_authorization", constants.NEEDS_REVIEW, "permit_unbounded",
+                                _("The operating permit has no recorded expiry; record one or a "
+                                  "reviewed non-expiring status."))
         if auths:
             return self._reason("operating_authorization", constants.NEEDS_REVIEW, "permit_unverified",
                                 _("Operating permit is present but not verified."))
         return self._reason("operating_authorization", constants.NEEDS_REVIEW, "permit_missing",
-                            _("No operating permit on file for this activity."))
+                            _("No operating permit on file for this activity and jurisdiction."))
+
+    def _auth_covers(self, auth, start, end, tz):
+        if not auth.date_end and not auth.open_ended:
+            return False  # unknown validity
+        if auth.date_start and start < self._doc_start(auth.date_start, tz):
+            return False
+        if auth.date_end and end > self._doc_end(auth.date_end, tz):
+            return False
+        return True
 
     def _check_document(self, subject_field, subject, doc_kind, start, end, tz):
         creds = self.env["fleetflow.credential"].search([
             (subject_field, "=", subject.id), ("doc_kind", "=", doc_kind),
         ])
-        verified = creds.filtered(lambda c: c.state == "verified")
-        covering = verified.filtered(lambda c: c._covers_interval(start, end, tz))
+        states = {c.id: c._validity(start, end, tz) for c in creds}
+        covering = creds.filtered(lambda c: states[c.id] == "covers")
         if covering:
             # Warn if the covering document expires shortly after the interval.
-            soonest = min(covering.mapped("date_end") or [False])
+            ends = [d for d in covering.mapped("date_end") if d]
+            soonest = min(ends) if ends else False
             if soonest and self._doc_end(soonest, tz) <= end + timedelta(days=WARN_WINDOW_DAYS):
                 return self._reason(doc_kind, constants.WARNING, "expiring_soon",
                                     _("%s is valid but expires within %d days after the interval.")
                                     % (doc_kind, WARN_WINDOW_DAYS), ref=covering[:1])
             return self._reason(doc_kind, constants.READY, "doc_ok",
                                 _("%s valid for the interval.") % doc_kind, ref=covering[:1])
-        if verified:
-            # Verified but not covering the whole interval => expires mid-interval.
+        expired = creds.filtered(lambda c: states[c.id] == "expired")
+        if expired:
+            # Verified but not effective for the whole interval => expired/not yet valid.
             return self._reason(doc_kind, constants.BLOCKED, "doc_expired",
-                                _("%s expires during the requested interval.") % doc_kind,
-                                ref=verified[:1])
+                                _("%s is not valid for the whole interval (expired or not "
+                                  "yet effective).") % doc_kind, ref=expired[:1])
+        unknown = creds.filtered(lambda c: states[c.id] == "unknown")
+        if unknown:
+            # Verified but with a blank 'valid until' (not a reviewed non-expiring)
+            # or an imprecise date => validity is unknown, never treated as unlimited.
+            return self._reason(doc_kind, constants.NEEDS_REVIEW, "doc_validity_unknown",
+                                _("%s is verified but its validity is unknown (no expiry on "
+                                  "file, or an imprecise date). Record a precise expiry or a "
+                                  "reviewed non-expiring status.") % doc_kind, ref=unknown[:1])
         if creds:
             return self._reason(doc_kind, constants.NEEDS_REVIEW, "doc_unverified",
                                 _("%s is present but not verified.") % doc_kind, ref=creds[:1])
@@ -246,14 +274,17 @@ class FleetflowReadiness(models.AbstractModel):
                                     _("The interval is close to the authorised end-of-use date."))
             return self._reason("end_of_use", constants.READY, "end_of_use_ok",
                                 _("Within the authorised end-of-use date."))
-        # No individual end-of-use date on file: we do not invent a generic age
-        # limit. If the category is unknown, applicability is unresolved.
-        if vehicle.ff_official_category in (False, "unknown"):
-            return self._reason("end_of_use", constants.NEEDS_REVIEW, "end_of_use_unknown",
-                                _("Age applicability is unresolved (category unknown, no "
-                                  "authorised end-of-use recorded)."))
-        return self._reason("end_of_use", constants.READY, "end_of_use_na",
-                            _("No individual end-of-use restriction recorded for this category."))
+        # A reviewer may record that no end-of-use restriction applies (with
+        # provenance) -- that is an explicit determination, distinct from a blank.
+        if vehicle.ff_end_of_use_exempt:
+            return self._reason("end_of_use", constants.READY, "end_of_use_exempt",
+                                _("Reviewed: no end-of-use restriction applies to this vehicle."))
+        # No authorised date and no reviewed exemption: applicability is
+        # unresolved. We neither invent a generic age limit nor treat the blank
+        # as 'no restriction'. Fail closed.
+        return self._reason("end_of_use", constants.NEEDS_REVIEW, "end_of_use_unknown",
+                            _("Age applicability is unresolved: record an authorised "
+                              "end-of-use date, or a reviewed exemption with provenance."))
 
     def _check_channels(self, company, vehicle, driver, operating_mode, channel_products, now, city):
         """Evaluate EACH requested (channel, product) independently, and within it
@@ -337,8 +368,11 @@ class FleetflowReadiness(models.AbstractModel):
         return self.env[model].browse(int(value)) if value else self.env[model]
 
     def _operator_tz(self, company):
+        # Deterministic operator timezone: derived from the operating company,
+        # never the requesting user's preference (two staff must read the same
+        # date-only evidence identically).
         name = (company.partner_id.tz if company and company.partner_id else False) \
-            or self.env.user.tz or "Asia/Dubai"
+            or "Asia/Dubai"
         try:
             return pytz.timezone(name)
         except Exception:

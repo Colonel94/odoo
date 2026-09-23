@@ -57,6 +57,13 @@ class FleetVehicle(models.Model):
         help="Individually authorised end-of-use date from official evidence, "
              "when known. Absence does not imply any generic age limit.",
     )
+    ff_end_of_use_exempt = fields.Boolean(
+        string="End-of-use: reviewed exemption", readonly=True, copy=False,
+        help="A compliance reviewer has determined that no end-of-use restriction "
+             "applies to this vehicle. A blank field is NOT an exemption.",
+    )
+    ff_end_of_use_reviewed_by = fields.Many2one("res.users", readonly=True, copy=False)
+    ff_end_of_use_reviewed_on = fields.Datetime(readonly=True, copy=False)
 
     # -- Plate identity ------------------------------------------------------
     ff_emirate = fields.Char(string="Emirate")
@@ -110,22 +117,25 @@ class FleetVehicle(models.Model):
                     "First registration cannot precede the manufacture date on %s."
                 ) % vehicle.display_name)
 
+    # Authority-bearing fields set only through the compliance actions below
+    # (which write at the ORM level via super()); a user who merely holds
+    # vehicle-write rights cannot forge them by a direct edit.
+    _FF_REVIEW_FIELDS = {"ff_operational_state", "ff_authorized_end_of_use",
+                         "ff_end_of_use_exempt", "ff_end_of_use_reviewed_by",
+                         "ff_end_of_use_reviewed_on"}
+
     def write(self, vals):
-        # The operational review state is authority-bearing: a vehicle becomes
-        # dispatchable only when a compliance reviewer confirms it. A user who
-        # merely holds vehicle-write rights (e.g. a fleet manager) must not be
-        # able to set it by a direct edit; it moves only through the compliance
-        # actions below (which write at the ORM level via super()).
-        if "ff_operational_state" in vals:
+        forbidden = self._FF_REVIEW_FIELDS & set(vals)
+        if forbidden:
             raise AccessError(_(
-                "A vehicle's operational review state is set by the compliance "
-                "review action, not by a direct edit."))
+                "A vehicle's operational review state and authorised end-of-use "
+                "are set by the compliance review actions, not by a direct edit."))
         return super().write(vals)
 
     def _require_compliance(self):
         if not (self.env.user.has_group("fleetflow_operations.group_ops_compliance")
                 or self.env.su):
-            raise AccessError(_("Only a compliance reviewer can change a vehicle's operational review state."))
+            raise AccessError(_("Only a compliance reviewer can perform this vehicle review action."))
 
     def ff_mark_reviewed(self):
         """Compliance action: mark a vehicle operationally reviewed."""
@@ -136,6 +146,20 @@ class FleetVehicle(models.Model):
         """Compliance action: return a vehicle to operationally unreviewed."""
         self._require_compliance()
         return super().write({"ff_operational_state": "unreviewed"})
+
+    def ff_review_end_of_use(self, exempt=False, authorized_end_of_use=None):
+        """Compliance action: record an age/end-of-use determination with
+        provenance -- either an authorised end-of-use date, or an explicit
+        reviewed exemption. A blank field is never treated as either."""
+        self._require_compliance()
+        vals = {
+            "ff_end_of_use_exempt": bool(exempt),
+            "ff_end_of_use_reviewed_by": self.env.uid,
+            "ff_end_of_use_reviewed_on": fields.Datetime.now(),
+        }
+        if authorized_end_of_use is not None:
+            vals["ff_authorized_end_of_use"] = authorized_end_of_use
+        return super().write(vals)
 
 
 class FleetVehiclePlateLog(models.Model):
