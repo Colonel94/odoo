@@ -90,17 +90,26 @@ class FleetflowChannelEnrolment(models.Model):
                 "Only a compliance reviewer can change a channel enrolment's "
                 "approval status."))
 
+    def _bump_subject_locks(self):
+        """A channel status change alters a subject's readiness: serialise on the
+        shared vehicle/driver lock so a concurrent checkout cannot miss it."""
+        constants.bump_resource_locks(
+            self.env, self.mapped("vehicle_id").ids, self.mapped("driver_id").ids)
+
     def action_approve(self):
         self._require_reviewer()
         self._apply({"state": "approved", "verified_as_of": fields.Datetime.now()})
+        self._bump_subject_locks()
 
     def action_suspend(self):
         self._require_reviewer()
         self._apply({"state": "suspended", "verified_as_of": fields.Datetime.now()})
+        self._bump_subject_locks()
 
     def action_reject(self):
         self._require_reviewer()
         self._apply({"state": "rejected", "verified_as_of": fields.Datetime.now()})
+        self._bump_subject_locks()
 
     def _is_fresh(self, at_dt, max_age_days):
         """True if the platform status was verified recently enough per policy."""

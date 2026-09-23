@@ -166,19 +166,10 @@ class FleetflowAllocation(models.Model):
         self._lock_ids(self.mapped("vehicle_id").ids, self.mapped("driver_id").ids)
 
     def _lock_ids(self, vehicle_ids, driver_ids):
-        """Bump the lock counter on specific vehicle/driver rows (vehicles first,
-        both in id order) so competing transactions serialise deterministically."""
+        """Bump the shared lock counter on specific vehicle/driver rows so
+        competing transactions serialise deterministically."""
         self.flush_recordset()
-        vehicle_ids = tuple(sorted(set(vehicle_ids)))
-        driver_ids = tuple(sorted(set(driver_ids)))
-        if vehicle_ids:
-            self.env.cr.execute(
-                "UPDATE fleet_vehicle SET ff_alloc_lock = COALESCE(ff_alloc_lock, 0) + 1 "
-                "WHERE id IN %s", (vehicle_ids,))
-        if driver_ids:
-            self.env.cr.execute(
-                "UPDATE fleetflow_driver SET ff_alloc_lock = COALESCE(ff_alloc_lock, 0) + 1 "
-                "WHERE id IN %s", (driver_ids,))
+        constants.bump_resource_locks(self.env, vehicle_ids, driver_ids)
         self.invalidate_recordset()
 
     def _overlapping_domain(self):

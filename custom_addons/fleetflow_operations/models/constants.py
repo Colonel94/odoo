@@ -92,3 +92,26 @@ def worst(states):
         if _SEVERITY.get(state, 0) > _SEVERITY.get(result, 0):
             result = state
     return result
+
+
+def bump_resource_locks(env, vehicle_ids=(), driver_ids=()):
+    """Serialise dispatch-affecting changes on the persistent resource rows.
+
+    Confirm/checkout/reschedule already bump a lock counter on the vehicle and
+    driver rows so competing reservations serialise (Postgres first-updater-wins
+    under REPEATABLE READ). ANY other mutation that can invalidate a dispatch
+    decision -- a hold, an evidence verification/revocation, a channel status
+    change -- must bump the SAME counter, so a concurrent checkout and such a
+    change cannot both succeed on stale snapshots. Vehicles are updated before
+    drivers, both in id order, so two transactions cannot deadlock.
+    """
+    vehicle_ids = tuple(sorted({i for i in vehicle_ids if i}))
+    driver_ids = tuple(sorted({i for i in driver_ids if i}))
+    if vehicle_ids:
+        env.cr.execute(
+            "UPDATE fleet_vehicle SET ff_alloc_lock = COALESCE(ff_alloc_lock, 0) + 1 "
+            "WHERE id IN %s", (vehicle_ids,))
+    if driver_ids:
+        env.cr.execute(
+            "UPDATE fleetflow_driver SET ff_alloc_lock = COALESCE(ff_alloc_lock, 0) + 1 "
+            "WHERE id IN %s", (driver_ids,))

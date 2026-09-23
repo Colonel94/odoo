@@ -2,6 +2,8 @@
 from odoo import api, fields, models, _
 from odoo.exceptions import AccessError, UserError
 
+from . import constants
+
 
 class FleetflowVehicleHold(models.Model):
     """An explicit block on a vehicle, independent of any workflow stage.
@@ -68,7 +70,11 @@ class FleetflowVehicleHold(models.Model):
             vals["state"] = "active"
             for key in ("cleared_by", "cleared_on", "clear_note"):
                 vals[key] = False
-        return super().create(vals_list)
+        records = super().create(vals_list)
+        # A new hold can invalidate a concurrent checkout: bump the shared vehicle
+        # lock so the two transactions serialise instead of both winning.
+        constants.bump_resource_locks(self.env, records.mapped("vehicle_id").ids)
+        return records
 
     def write(self, vals):
         # A hold is cleared only through action_clear (with a note); no context
@@ -97,4 +103,6 @@ class FleetflowVehicleHold(models.Model):
                 "state": "cleared", "cleared_by": self.env.uid,
                 "cleared_on": fields.Datetime.now(), "clear_note": note.strip(),
             })
+        # Clearing a blocking hold can re-enable dispatch: serialise on the vehicle.
+        constants.bump_resource_locks(self.env, self.mapped("vehicle_id").ids)
         return True

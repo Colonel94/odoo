@@ -169,7 +169,14 @@ class FleetflowCredential(models.Model):
             predecessor = rec.supersedes_id
             if predecessor and predecessor.state == "verified":
                 predecessor._apply({"state": "superseded", "superseded_by_id": rec.id})
+        self._bump_subject_locks()
         return True
+
+    def _bump_subject_locks(self):
+        """A verification/revocation changes a subject's readiness: serialise on
+        the shared vehicle/driver lock so a concurrent checkout cannot miss it."""
+        constants.bump_resource_locks(
+            self.env, self.mapped("vehicle_id").ids, self.mapped("driver_id").ids)
 
     def action_submit(self):
         self.filtered(lambda r: r.state == "draft").write({"state": "pending"})
@@ -180,6 +187,7 @@ class FleetflowCredential(models.Model):
         self._apply({
             "state": "rejected", "verified_by": self.env.uid, "verified_on": fields.Datetime.now(),
         })
+        self._bump_subject_locks()
         return True
 
     def action_supersede(self, new_vals):
