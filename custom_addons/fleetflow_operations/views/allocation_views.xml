@@ -31,6 +31,7 @@
                     <group>
                         <group string="Plan">
                             <field name="operating_mode"/>
+                            <field name="city" attrs="{'readonly': [('state', '!=', 'draft')]}"/>
                             <field name="vehicle_id" attrs="{'readonly': [('state', '!=', 'draft')]}"/>
                             <field name="driver_id" attrs="{'readonly': [('state', '!=', 'draft')],
                                    'required': [('operating_mode', '=', 'chauffeur')]}"/>

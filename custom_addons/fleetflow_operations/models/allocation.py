@@ -28,6 +28,8 @@ class FleetflowAllocation(models.Model):
     company_id = fields.Many2one(
         "res.company", required=True, default=lambda s: s.env.company, index=True)
     operating_mode = fields.Selection(constants.OPERATING_MODES, required=True, default="chauffeur")
+    city = fields.Char(required=True, default="Dubai",
+                       help="Operating city; channel platform approval is matched per city.")
     vehicle_id = fields.Many2one("fleet.vehicle", required=True, check_company=True, index=True, ondelete="restrict")
     driver_id = fields.Many2one("fleetflow.driver", check_company=True, index=True, ondelete="restrict")
     channel_enrolment_ids = fields.Many2many("fleetflow.channel.enrolment", string="Channel products")
@@ -92,7 +94,7 @@ class FleetflowAllocation(models.Model):
     # a change then requires the audited amendment path, which re-locks resources
     # and re-evaluates readiness and conflicts.
     _PLANNING = {"vehicle_id", "driver_id", "operating_mode", "planned_start",
-                 "planned_end", "channel_enrolment_ids"}
+                 "planned_end", "channel_enrolment_ids", "city"}
 
     @api.constrains("planned_start", "planned_end")
     def _check_interval(self):
@@ -221,7 +223,7 @@ class FleetflowAllocation(models.Model):
         return self.env["fleetflow.readiness"].evaluate_readiness(
             self.company_id, self.vehicle_id, self.driver_id, self.operating_mode,
             self._requested_channel_products(),
-            start or self.planned_start, end or self.planned_end)
+            start or self.planned_start, end or self.planned_end, city=self.city)
 
     def _decision_vals(self, result):
         return {
@@ -399,6 +401,7 @@ class FleetflowAllocation(models.Model):
         new_start = vals.get("planned_start", self.planned_start)
         new_end = vals.get("planned_end", self.planned_end)
         new_mode = vals.get("operating_mode", self.operating_mode)
+        new_city = vals.get("city", self.city)
         new_vehicle = (self.env["fleet.vehicle"].browse(vals["vehicle_id"])
                        if "vehicle_id" in vals else self.vehicle_id)
         if "driver_id" in vals:
@@ -421,7 +424,8 @@ class FleetflowAllocation(models.Model):
             products = self._requested_channel_products()
 
         result = self.env["fleetflow.readiness"].evaluate_readiness(
-            self.company_id, new_vehicle, new_driver, new_mode, products, new_start, new_end)
+            self.company_id, new_vehicle, new_driver, new_mode, products,
+            new_start, new_end, city=new_city)
         if not result["can_confirm"]:
             raise UserError(_("The amended plan is not ready:\n- %s")
                             % "\n- ".join(result["next_actions"]))

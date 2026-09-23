@@ -62,6 +62,9 @@ class TestAllocation(OperationsCase):
             "ff_operational_state": "reviewed"})
         for kind in ("vehicle_registration", "insurance"):
             self.make_credential(kind, "vehicle_id", v2)
+        # v2 also needs its own Uber vehicle approval to be otherwise-eligible, so
+        # the confirm fails on the driver double-booking, not on missing evidence.
+        self.make_channel("uber", "UberX", "vehicle_id", v2)
         b = self.make_allocation(s, e, vehicle=v2, channels=self.enr, user=self.dispatcher)
         with self.assertRaises(UserError):
             b.action_confirm()

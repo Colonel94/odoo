@@ -110,7 +110,11 @@ class OperationsCase(TransactionCase):
         self.make_credential("insurance", "vehicle_id", self.vehicle)
         self.make_credential("driver_licence", "driver_id", self.driver)
         self.make_credential("professional_permit", "driver_id", self.driver)
+        # A platform product needs BOTH the vehicle and the driver approved (the
+        # earlier fixture approved only the driver, which is why the missing
+        # vehicle-approval check went unnoticed).
         self.make_channel("uber", "UberX", "driver_id", self.driver)
+        self.make_channel("uber", "UberX", "vehicle_id", self.vehicle)
 
     def make_allocation(self, start=None, end=None, vehicle=None, driver=None,
                         channels=None, mode="chauffeur", user=None):

@@ -108,6 +108,10 @@ def seed(env):
     enr_a = env["fleetflow.channel.enrolment"].create({
         "company_id": company.id, "channel": "uber", "product": "UberX", "driver_id": da.id})
     enr_a.action_approve()  # approval is reviewer-set, not a create-time value
+    # A platform product needs BOTH the vehicle and the driver approved.
+    env["fleetflow.channel.enrolment"].create({
+        "company_id": company.id, "channel": "uber", "product": "UberX", "vehicle_id": va.id
+    }).action_approve()
     s, e = shift(va, da)
     env["fleetflow.allocation"].create({
         "name": MARK + " A-ready", "company_id": company.id, "operating_mode": "chauffeur",

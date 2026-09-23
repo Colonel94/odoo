@@ -35,11 +35,14 @@ class FleetflowReadiness(models.AbstractModel):
     # ------------------------------------------------------------------
     @api.model
     def evaluate_readiness(self, company, vehicle, driver, operating_mode,
-                           channel_products, starts_at, ends_at):
+                           channel_products, starts_at, ends_at, city="Dubai"):
         company = self._as_record("res.company", company)
         vehicle = self._as_record("fleet.vehicle", vehicle)
         driver = self._as_record("fleetflow.driver", driver) if driver else self.env["fleetflow.driver"]
-        channel_products = channel_products or []
+        # Deterministic, de-duplicated products: ordering must not affect policy
+        # selection or the verdict (it previously came from an unordered set).
+        channel_products = sorted(set(tuple(cp) for cp in (channel_products or [])))
+        city = city or "Dubai"
 
         tz = self._operator_tz(company)
         start = self._aware(starts_at, tz)
@@ -51,11 +54,12 @@ class FleetflowReadiness(models.AbstractModel):
             reasons.append(self._reason("interval", constants.BLOCKED, "bad_interval",
                                         _("The requested end is not after the start.")))
 
+        # Mode-level policy: which document/authority checks apply and WHETHER
+        # channel approval is required at all. Channel coverage is then evaluated
+        # per requested product below, so one product's data never stands in for
+        # another product's.
         profile = self.env["fleetflow.operating.profile"]._match(
-            company, operating_mode,
-            channel_products[0][0] if channel_products else None,
-            channel_products[0][1] if channel_products else None,
-        )
+            company, operating_mode, None, None)
         if not profile:
             reasons.append(self._reason(
                 "policy", constants.NEEDS_REVIEW, "no_policy",
@@ -104,9 +108,10 @@ class FleetflowReadiness(models.AbstractModel):
         if "end_of_use" in required:
             reasons.append(self._check_end_of_use(vehicle, end, tz))
 
-        # -- Channel approvals --------------------------------------------
+        # -- Channel approvals (per requested product, per subject) -------
         if "channel_approval" in required:
-            reasons += self._check_channels(company, vehicle, driver, channel_products, now, profile)
+            reasons += self._check_channels(
+                company, vehicle, driver, operating_mode, channel_products, now, city)
 
         status = constants.worst(r["status"] for r in reasons) if reasons else constants.READY
         return {
@@ -250,36 +255,62 @@ class FleetflowReadiness(models.AbstractModel):
         return self._reason("end_of_use", constants.READY, "end_of_use_na",
                             _("No individual end-of-use restriction recorded for this category."))
 
-    def _check_channels(self, company, vehicle, driver, channel_products, now, profile):
+    def _check_channels(self, company, vehicle, driver, operating_mode, channel_products, now, city):
+        """Evaluate EACH requested (channel, product) independently, and within it
+        EACH required subject.
+
+        A platform product needs both the vehicle and the driver approved for a
+        chauffeur shift (the vehicle alone for a driverless rental). Approval must
+        match the operating city, be fresh (per the product's profile) and past no
+        recheck date, and an approval on one subject never masks a suspension on
+        another. Missing coverage on any required subject fails closed."""
         if not channel_products:
             return [self._reason("channel_approval", constants.NEEDS_REVIEW, "no_channel",
                                  _("Channel approval required but no channel/product requested."))]
-        max_age = profile.channel_freshness_days if profile else 0
         out = []
         for channel, product in channel_products:
-            domain = [("company_id", "=", company.id), ("channel", "=", channel),
-                      ("product", "=", product),
-                      "|", ("vehicle_id", "=", vehicle.id),
-                      ("driver_id", "=", driver.id if driver else False)]
-            enrolments = self.env["fleetflow.channel.enrolment"].search(domain)
-            label = "%s/%s" % (channel, product)
-            approved = enrolments.filtered(lambda e: e.state == "approved")
-            if not enrolments:
-                out.append(self._reason("channel_approval", constants.NEEDS_REVIEW, "channel_missing",
-                                        _("No %s enrolment on file.") % label))
-            elif enrolments.filtered(lambda e: e.state in ("suspended", "rejected")) and not approved:
-                out.append(self._reason("channel_approval", constants.BLOCKED, "channel_suspended",
-                                        _("%s enrolment is suspended/rejected.") % label))
-            elif not approved:
-                out.append(self._reason("channel_approval", constants.NEEDS_REVIEW, "channel_pending",
-                                        _("%s enrolment is pending approval.") % label))
-            elif not any(e._is_fresh(now, max_age) for e in approved):
-                out.append(self._reason("channel_approval", constants.NEEDS_REVIEW, "channel_stale",
-                                        _("%s approval is stale; re-verify the platform status.") % label))
-            else:
-                out.append(self._reason("channel_approval", constants.READY, "channel_ok",
-                                        _("%s approved and fresh.") % label))
+            cprofile = self.env["fleetflow.operating.profile"]._match(
+                company, operating_mode, channel, product)
+            max_age = cprofile.channel_freshness_days if cprofile else 0
+            label = "%s/%s (%s)" % (channel, product, city)
+            subjects = [("vehicle_id", vehicle, _("vehicle"))]
+            if operating_mode == "chauffeur":
+                subjects.append(("driver_id", driver, _("driver")))
+            for field, subject, subj_label in subjects:
+                out.append(self._check_channel_subject(
+                    company, channel, product, city, field, subject, subj_label, now, max_age, label))
         return out
+
+    def _check_channel_subject(self, company, channel, product, city, field, subject,
+                               subj_label, now, max_age, label):
+        if not subject:
+            return self._reason("channel_approval", constants.BLOCKED, "channel_no_subject",
+                                _("%s requires a %s, but none is set.") % (label, subj_label))
+        enrolments = self.env["fleetflow.channel.enrolment"].search([
+            ("company_id", "=", company.id), ("channel", "=", channel),
+            ("product", "=", product), ("city", "=", city), (field, "=", subject.id)])
+        if not enrolments:
+            return self._reason("channel_approval", constants.NEEDS_REVIEW, "channel_missing",
+                                _("No %s enrolment on file for the %s.") % (label, subj_label))
+        # A suspension/rejection on this subject blocks, regardless of any other
+        # approved record for the same subject (no masking).
+        if enrolments.filtered(lambda e: e.state in ("suspended", "rejected")):
+            return self._reason("channel_approval", constants.BLOCKED, "channel_suspended",
+                                _("%s enrolment is suspended/rejected for the %s.") % (label, subj_label))
+        approved = enrolments.filtered(lambda e: e.state == "approved")
+        if not approved:
+            return self._reason("channel_approval", constants.NEEDS_REVIEW, "channel_pending",
+                                _("%s enrolment is pending approval for the %s.") % (label, subj_label))
+        if not any(e._is_fresh(now, max_age) and self._recheck_ok(e) for e in approved):
+            return self._reason("channel_approval", constants.NEEDS_REVIEW, "channel_stale",
+                                _("%s approval for the %s is stale or past its recheck date; "
+                                  "re-verify the platform status.") % (label, subj_label))
+        return self._reason("channel_approval", constants.READY, "channel_ok",
+                            _("%s approved and fresh for the %s.") % (label, subj_label))
+
+    @staticmethod
+    def _recheck_ok(enrolment):
+        return not enrolment.recheck_date or enrolment.recheck_date >= fields.Date.today()
 
     # ------------------------------------------------------------------
     # Helpers

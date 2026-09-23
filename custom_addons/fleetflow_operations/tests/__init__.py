@@ -6,3 +6,4 @@ from . import test_concurrency
 from . import test_security
 from . import test_lifecycle
 from . import test_amendment_checkout
+from . import test_eligibility
