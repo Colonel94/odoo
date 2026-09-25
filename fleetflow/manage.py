@@ -30,7 +30,8 @@ def compose(args, project='fleetflow'):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['init', 'start', 'stop', 'logs', 'test', 'test-http', 'demo'])
+    parser.add_argument('command', choices=['init', 'start', 'stop', 'logs', 'test',
+                                             'test-http', 'test-update', 'demo'])
     args = parser.parse_args()
     if not shutil.which('docker'):
         raise SystemExit('Docker is not available. Install and start Docker with Compose v2 first.')
@@ -73,6 +74,21 @@ def main():
             compose(['up', '-d', '--wait', 'db'], project)
             compose(['run', '--rm', 'web', '-i', 'fleetflow_operations', '--without-demo=all', '--test-enable',
                      '--test-tags', 'ff_http', '--stop-after-init'], project)
+        finally:
+            compose(['down', '-v'], project)
+    elif args.command == 'test-update':
+        # Disposable module-UPDATE drill: install the module, then upgrade it in
+        # the same throwaway DB so the schema change (ever_verified) and its
+        # migration script run, and the model suite passes on the upgraded module.
+        # Never touches the normal development database or volumes.
+        project = 'fleetflow-update-test'
+        try:
+            compose(['up', '-d', '--wait', 'db'], project)
+            compose(['run', '--rm', 'web', '-i', 'fleetflow_operations',
+                     '--without-demo=all', '--stop-after-init', '--no-http'], project)
+            compose(['run', '--rm', 'web', '-u', 'fleetflow_operations', '--without-demo=all',
+                     '--test-enable', '--test-tags', '/fleetflow,/fleetflow_operations,-ff_http',
+                     '--stop-after-init', '--no-http'], project)
         finally:
             compose(['down', '-v'], project)
 

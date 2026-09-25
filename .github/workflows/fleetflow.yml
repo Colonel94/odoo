@@ -19,3 +19,5 @@ jobs:
         run: python3 fleetflow/manage.py test
       - name: Authenticated HTTP boundary acceptance (ff_http) in isolated containers
         run: python3 fleetflow/manage.py test-http
+      - name: Disposable module-update drill (schema/migration) in isolated containers
+        run: python3 fleetflow/manage.py test-update

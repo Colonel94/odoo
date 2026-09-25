@@ -18,7 +18,8 @@ from datetime import date, datetime, time, timedelta
 from odoo.tests import tagged
 from odoo.tests.common import HttpCase
 
-PDF = b"%PDF-1.4 synthetic evidence body for http tests"
+# A minimal but structurally-valid PDF (has %%EOF, no active/embedded content).
+PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n"
 PW = "boundary-http-pw"
 
 
@@ -45,6 +46,12 @@ class TestHttpBoundary(HttpCase):
         cls.manager = user("http.mgr", "fleetflow_operations.group_ops_fleet_manager")
         cls.other_comp = user("http.ocomp", "fleetflow_operations.group_ops_compliance",
                               company=cls.other_company)
+        # A reviewer allowed in BOTH internal companies (for the transfer test).
+        cls.two_comp = env["res.users"].with_context(no_reset_password=True).create({
+            "name": "http.twoco", "login": "http.twoco", "password": PW,
+            "email": "http.twoco@example.com", "company_id": cls.company.id,
+            "company_ids": [(6, 0, [cls.company.id, cls.other_company.id])],
+            "groups_id": [(6, 0, [env.ref("fleetflow_operations.group_ops_compliance").id])]})
 
         brand = env["fleet.vehicle.model.brand"].create({"name": "HTTP brand"})
         model = env["fleet.vehicle.model"].create({"name": "HTTP model", "brand_id": brand.id})
@@ -77,15 +84,18 @@ class TestHttpBoundary(HttpCase):
         cls.lic = cred("driver_licence", "driver_id", cls.driver, attach=True)
         cls.evidence_att = cls.lic.attachment_id  # verified source, private
 
-        def enrol(field, subj, state="approved"):
+        def enrol(field, subj, state="approved", channel="uber", product="UberX"):
             e = env["fleetflow.channel.enrolment"].create({
-                "company_id": cls.company.id, "channel": "uber", "product": "UberX",
+                "company_id": cls.company.id, "channel": channel, "product": product,
                 "city": "Dubai", field: subj.id})
             {"approved": e.action_approve, "suspended": e.action_suspend}[state]()
             return e
         cls.enr_v = enrol("vehicle_id", cls.vehicle)
         cls.enr_d = enrol("driver_id", cls.driver)
-        cls.enr_suspended = enrol("driver_id", cls.driver, state="suspended")
+        # A suspended enrolment on a DIFFERENT product, so it does not pollute the
+        # uber readiness used by B05 but still exercises the "lift suspension" path.
+        cls.enr_suspended = enrol("driver_id", cls.driver, state="suspended",
+                                  channel="careem", product="CareemX")
 
         # A foreign file already bound to another record (for the reject case).
         cls.foreign_att = env["ir.attachment"].create({
@@ -112,10 +122,35 @@ class TestHttpBoundary(HttpCase):
         self.assertEqual(resp.status_code, 200, "transport should be 200; app errors live in the body")
         return resp.json()
 
+    # Business exceptions we accept as a legitimate denial. An unrelated
+    # programming error / HTTP 500 has a different data.name and must FAIL the test.
+    _BUSINESS_ERRORS = (
+        "odoo.exceptions.AccessError", "odoo.exceptions.UserError",
+        "odoo.exceptions.ValidationError", "odoo.exceptions.AccessDenied",
+        "odoo.exceptions.MissingError",
+    )
+
     def _denied(self, body):
-        """True if the JSON-RPC body carries an application error (an HTTP 200 with
-        an error payload is still a denial)."""
+        """True if the body carries ANY application error (used only for the
+        negative of success assertions, where a 500 should also fail the test)."""
         return isinstance(body, dict) and "error" in body
+
+    def _error_name(self, body):
+        if not (isinstance(body, dict) and "error" in body):
+            return None
+        return ((body["error"] or {}).get("data") or {}).get("name")
+
+    def _assert_denied(self, body, *allowed):
+        """Assert the call was denied by a BUSINESS exception (not a 500 / bug)."""
+        allowed = allowed or self._BUSINESS_ERRORS
+        name = self._error_name(body)
+        self.assertIn(name, allowed,
+                      "expected a business denial %s, got: %s" % (allowed, body))
+
+    def _assert_ok(self, body):
+        """Assert the call succeeded (no error payload at all)."""
+        self.assertFalse(self._denied(body), body)
+        return body.get("result")
 
     # ------------------------------------------------------------------
     # B01 -- dispatcher cannot transfer/relabel an approved enrolment or
@@ -123,12 +158,10 @@ class TestHttpBoundary(HttpCase):
     # ------------------------------------------------------------------
     def test_B01_dispatcher_cannot_mutate_approved_or_lift_suspension(self):
         self.authenticate("http.disp", PW)
-        body = self._rpc("fleetflow.channel.enrolment", "write",
-                         [[self.enr_d.id], {"city": "Abu Dhabi"}])
-        self.assertTrue(self._denied(body), body)
-        body = self._rpc("fleetflow.channel.enrolment", "write",
-                         [[self.enr_suspended.id], {"state": "pending"}])
-        self.assertTrue(self._denied(body), body)
+        self._assert_denied(self._rpc("fleetflow.channel.enrolment", "write",
+                                      [[self.enr_d.id], {"city": "Abu Dhabi"}]))
+        self._assert_denied(self._rpc("fleetflow.channel.enrolment", "write",
+                                      [[self.enr_suspended.id], {"state": "pending"}]))
         self.enr_d.invalidate_recordset()
         self.enr_suspended.invalidate_recordset()
         self.assertEqual(self.enr_d.city, "Dubai")
@@ -140,10 +173,10 @@ class TestHttpBoundary(HttpCase):
     # ------------------------------------------------------------------
     def test_B02_compliance_cannot_downgrade_history(self):
         self.authenticate("http.comp", PW)
-        self.assertTrue(self._denied(self._rpc(
-            "fleetflow.credential", "write", [[self.reg.id], {"state": "draft"}])))
-        self.assertTrue(self._denied(self._rpc(
-            "fleetflow.operating.profile", "write", [[self.profile.id], {"state": "draft"}])))
+        self._assert_denied(self._rpc(
+            "fleetflow.credential", "write", [[self.reg.id], {"state": "draft"}]))
+        self._assert_denied(self._rpc(
+            "fleetflow.operating.profile", "write", [[self.profile.id], {"state": "draft"}]))
         self.reg.invalidate_recordset()
         self.profile.invalidate_recordset()
         self.assertEqual(self.reg.state, "verified")
@@ -169,10 +202,10 @@ class TestHttpBoundary(HttpCase):
     # ------------------------------------------------------------------
     def test_B04_hold_history_is_protected_but_clear_works(self):
         self.authenticate("http.mgr", PW)
-        self.assertTrue(self._denied(self._rpc(
-            "fleetflow.vehicle.hold", "unlink", [[self.hold.id]])))
-        self.assertTrue(self._denied(self._rpc(
-            "fleetflow.vehicle.hold", "write", [[self.hold.id], {"dispatch_blocking": False}])))
+        self._assert_denied(self._rpc(
+            "fleetflow.vehicle.hold", "unlink", [[self.hold.id]]))
+        self._assert_denied(self._rpc(
+            "fleetflow.vehicle.hold", "write", [[self.hold.id], {"dispatch_blocking": False}]))
         self.hold.invalidate_recordset()
         self.assertTrue(self.hold.exists())
         self.assertTrue(self.hold.dispatch_blocking)
@@ -185,55 +218,68 @@ class TestHttpBoundary(HttpCase):
         self.assertEqual(self.hold.cleared_by, self.manager)
 
     # ------------------------------------------------------------------
-    # B05 -- verifying a renewal never retroactively drops current coverage;
-    #        competing verified revisions coexist deterministically.
+    # B05 -- a REAL linked future-effective renewal (via action_supersede):
+    #        verifying next month's renewal does not drop today's coverage; the
+    #        renewal covers only its own interval; attribution is preserved.
     # ------------------------------------------------------------------
-    def test_B05_future_renewal_preserves_current_coverage(self):
+    def _readiness(self, days_ahead):
+        day = date.today() + timedelta(days=days_ahead)
+        start = datetime.combine(day, time(8, 0)).strftime("%Y-%m-%d %H:%M:%S")
+        end = datetime.combine(day, time(18, 0)).strftime("%Y-%m-%d %H:%M:%S")
+        body = self._rpc("fleetflow.readiness", "evaluate_readiness",
+                         [self.company.id, self.vehicle.id, self.driver.id, "chauffeur",
+                          [["uber", "UberX"]], start, end], {"city": "Dubai"})
+        return self._assert_ok(body)
+
+    def test_B05_future_effective_linked_renewal_preserves_coverage(self):
         self.authenticate("http.comp", PW)
-        body = self._rpc("fleetflow.credential", "create", [{
-            "name": "reg-renewal-http", "doc_kind": "vehicle_registration",
-            "company_id": self.company.id, "vehicle_id": self.vehicle.id,
-            "date_start": date.today().isoformat(),
-            "date_end": (date.today() + timedelta(days=400)).isoformat()}])
-        self.assertFalse(self._denied(body), body)
-        renewal = self.env["fleetflow.credential"].browse(body["result"])
+        nm_start = date.today() + timedelta(days=31)
+        # Drive the ACTUAL supersede workflow over the API; it returns the id.
+        renewal_id = self._assert_ok(self._rpc(
+            "fleetflow.credential", "action_supersede", [[self.reg.id], {
+                "name": "reg-http-renewal",
+                "date_start": nm_start.isoformat(),
+                "date_end": (nm_start + timedelta(days=365)).isoformat()}]))
+        self.assertIsInstance(renewal_id, int)
         self.reg.invalidate_recordset()
-        self.assertEqual(self.reg.state, "verified")  # predecessor still effective
-        self.assertIn(renewal.state, ("draft", "pending"))
-        self.assertFalse(self._denied(self._rpc(
-            "fleetflow.credential", "action_verify", [[renewal.id]])))
+        self.assertEqual(self.reg.state, "verified")   # not superseded yet
+        original_verifier = self.reg.verified_by
+        # Readiness today is Ready (predecessor covers) BEFORE the renewal exists.
+        self.assertEqual(self._readiness(1)["status"], "ready")
+        # Verify next month's renewal TODAY.
+        self._assert_ok(self._rpc("fleetflow.credential", "action_verify", [[renewal_id]]))
         self.reg.invalidate_recordset()
-        renewal.invalidate_recordset()
-        # Both are verified; verifying the renewal did not invalidate the current
-        # registration (no coverage gap was opened).
-        self.assertEqual(self.reg.state, "verified")
-        self.assertEqual(renewal.state, "verified")
+        # Predecessor is now marked superseded WITH attribution preserved...
+        self.assertEqual(self.reg.state, "superseded")
+        self.assertEqual(self.reg.superseded_by_id.id, renewal_id)
+        self.assertTrue(self.reg.replaced_on)
+        self.assertEqual(self.reg.verified_by, original_verifier)  # unchanged
+        # ...yet today is STILL Ready (predecessor's effective interval), and a
+        # shift inside the renewal window is Ready via the renewal.
+        self.assertEqual(self._readiness(1)["status"], "ready")
+        self.assertEqual(self._readiness(40)["status"], "ready")
 
     # ------------------------------------------------------------------
     # B06 -- an own upload links; a foreign/bound file is rejected unchanged.
     # ------------------------------------------------------------------
     def test_B06_own_upload_links_foreign_rejected(self):
         self.authenticate("http.comp", PW)
-        att_body = self._rpc("ir.attachment", "create", [{
-            "name": "own.pdf", "datas": base64.b64encode(PDF).decode()}])
-        self.assertFalse(self._denied(att_body), att_body)
-        own_id = att_body["result"]
-        cred_body = self._rpc("fleetflow.credential", "create", [{
+        own_id = self._assert_ok(self._rpc("ir.attachment", "create", [{
+            "name": "own.pdf", "datas": base64.b64encode(PDF).decode()}]))
+        self._assert_ok(self._rpc("fleetflow.credential", "create", [{
             "name": "own-linked", "doc_kind": "professional_permit",
             "company_id": self.company.id, "driver_id": self.driver.id,
-            "attachment_id": own_id}])
-        self.assertFalse(self._denied(cred_body), cred_body)
+            "attachment_id": own_id}]))
         att = self.env["ir.attachment"].browse(own_id)
         att.invalidate_recordset()
         self.assertEqual(att.res_model, "fleetflow.credential")
         self.assertFalse(att.public)
         # A file already bound to another record is refused; it stays unchanged.
         before = (self.foreign_att.res_model, self.foreign_att.res_id)
-        rej = self._rpc("fleetflow.credential", "create", [{
+        self._assert_denied(self._rpc("fleetflow.credential", "create", [{
             "name": "steal", "doc_kind": "professional_permit",
             "company_id": self.company.id, "driver_id": self.driver.id,
-            "attachment_id": self.foreign_att.id}])
-        self.assertTrue(self._denied(rej), rej)
+            "attachment_id": self.foreign_att.id}]))
         self.foreign_att.invalidate_recordset()
         self.assertEqual((self.foreign_att.res_model, self.foreign_att.res_id), before)
 
@@ -245,10 +291,10 @@ class TestHttpBoundary(HttpCase):
         self.authenticate("http.comp", PW)
         for vals in ({"public": True}, {"datas": base64.b64encode(b"%PDF-1.4 tampered").decode()},
                      {"res_model": "res.partner"}):
-            self.assertTrue(self._denied(self._rpc(
-                "ir.attachment", "write", [[self.evidence_att.id], vals])), vals)
-        self.assertTrue(self._denied(self._rpc(
-            "ir.attachment", "unlink", [[self.evidence_att.id]])))
+            self._assert_denied(self._rpc(
+                "ir.attachment", "write", [[self.evidence_att.id], vals]))
+        self._assert_denied(self._rpc(
+            "ir.attachment", "unlink", [[self.evidence_att.id]]))
         self.evidence_att.invalidate_recordset()
         self.assertFalse(self.evidence_att.public)
         self.assertEqual(self.evidence_att.res_model, "fleetflow.credential")
@@ -275,8 +321,8 @@ class TestHttpBoundary(HttpCase):
         self.assertIn(PDF, ok.content)
         # ...and a dispatcher can still read the non-sensitive metadata.
         self.authenticate("http.disp", PW)
-        meta = self._rpc("fleetflow.credential", "read", [[self.lic.id], ["doc_kind", "state"]])
-        self.assertFalse(self._denied(meta), meta)
+        self._assert_ok(self._rpc(
+            "fleetflow.credential", "read", [[self.lic.id], ["doc_kind", "state"]]))
 
     # ------------------------------------------------------------------
     # B09 -- public / access-token variants cannot bypass the private policy.
@@ -295,17 +341,108 @@ class TestHttpBoundary(HttpCase):
     def test_B10_allowed_actions_still_work(self):
         # Compliance can verify a fresh draft credential.
         self.authenticate("http.comp", PW)
-        draft = self._rpc("fleetflow.credential", "create", [{
+        draft_id = self._assert_ok(self._rpc("fleetflow.credential", "create", [{
             "name": "b10-draft", "doc_kind": "inspection",
-            "company_id": self.company.id, "vehicle_id": self.vehicle.id}])
-        self.assertFalse(self._denied(draft), draft)
-        self.assertFalse(self._denied(self._rpc(
-            "fleetflow.credential", "action_verify", [[draft["result"]]])))
+            "company_id": self.company.id, "vehicle_id": self.vehicle.id}]))
+        self._assert_ok(self._rpc("fleetflow.credential", "action_verify", [[draft_id]]))
         # A dispatcher can still create and read an ordinary (non-evidence)
         # attachment: the guard is scoped to credential files only.
         self.authenticate("http.disp", PW)
-        att = self._rpc("ir.attachment", "create", [{
-            "name": "note.txt", "datas": base64.b64encode(b"hello").decode()}])
-        self.assertFalse(self._denied(att), att)
-        self.assertFalse(self._denied(self._rpc(
-            "ir.attachment", "read", [[att["result"]], ["name"]])))
+        att_id = self._assert_ok(self._rpc("ir.attachment", "create", [{
+            "name": "note.txt", "datas": base64.b64encode(b"hello").decode()}]))
+        self._assert_ok(self._rpc("ir.attachment", "read", [[att_id], ["name"]]))
+
+    # ------------------------------------------------------------------
+    # B11 -- rejecting/revoking evidence keeps its once-approved source frozen
+    #        and preserves the original verification attribution (E02).
+    # ------------------------------------------------------------------
+    def test_B11_revoked_source_stays_immutable_over_rpc(self):
+        self.authenticate("http.comp", PW)
+        att_id = self._assert_ok(self._rpc("ir.attachment", "create", [{
+            "name": "rev.pdf", "datas": base64.b64encode(PDF).decode()}]))
+        cred_id = self._assert_ok(self._rpc("fleetflow.credential", "create", [{
+            "name": "rev", "doc_kind": "driver_licence",
+            "company_id": self.company.id, "driver_id": self.driver.id,
+            "attachment_id": att_id}]))
+        self._assert_ok(self._rpc("fleetflow.credential", "action_verify", [[cred_id]]))
+        self._assert_ok(self._rpc("fleetflow.credential", "action_reject", [[cred_id]],
+                                  {"reason": "revoked over http"}))
+        cred = self.env["fleetflow.credential"].browse(cred_id)
+        cred.invalidate_recordset()
+        self.assertEqual(cred.state, "rejected")
+        self.assertTrue(cred.ever_verified)
+        self.assertTrue(cred.verified_by)        # original verifier retained
+        self.assertTrue(cred.revoked_by)
+        # The once-approved source is still frozen after revocation.
+        for vals in ({"public": True},
+                     {"datas": base64.b64encode(b"%PDF-1.4 tampered\n%%EOF").decode()}):
+            self._assert_denied(self._rpc("ir.attachment", "write", [[att_id], vals]))
+        self._assert_denied(self._rpc("ir.attachment", "unlink", [[att_id]]))
+
+    # ------------------------------------------------------------------
+    # B12 -- a file changed after linking is re-validated at verification (E05).
+    # ------------------------------------------------------------------
+    def test_B12_file_changed_after_link_fails_verification(self):
+        self.authenticate("http.comp", PW)
+        att_id = self._assert_ok(self._rpc("ir.attachment", "create", [{
+            "name": "ok.pdf", "datas": base64.b64encode(PDF).decode()}]))
+        cred_id = self._assert_ok(self._rpc("fleetflow.credential", "create", [{
+            "name": "changed", "doc_kind": "driver_licence",
+            "company_id": self.company.id, "driver_id": self.driver.id,
+            "attachment_id": att_id}]))
+        # The draft's file is swapped for a malformed one (allowed while draft)...
+        self._assert_ok(self._rpc("ir.attachment", "write", [[att_id], {
+            "datas": base64.b64encode(b"%PDF-1.4 no eof marker").decode()}]))
+        # ...verification re-validates the CURRENT bytes and refuses.
+        self._assert_denied(self._rpc("fleetflow.credential", "action_verify", [[cred_id]]))
+        cred = self.env["fleetflow.credential"].browse(cred_id)
+        cred.invalidate_recordset()
+        self.assertNotEqual(cred.state, "verified")
+
+    # ------------------------------------------------------------------
+    # B13 -- a real access token issued BEFORE binding is voided by binding, and
+    #        a protected source cannot regain a usable token (E06 lifecycle).
+    # ------------------------------------------------------------------
+    def test_B13_pre_binding_token_is_voided_by_binding(self):
+        self.authenticate("http.comp", PW)
+        att_id = self._assert_ok(self._rpc("ir.attachment", "create", [{
+            "name": "tok.pdf", "datas": base64.b64encode(PDF).decode()}]))
+        tokens = self._assert_ok(self._rpc(
+            "ir.attachment", "generate_access_token", [[att_id]]))
+        old_token = tokens[0]
+        # Bind the file to a credential (this privatises it and drops the token).
+        self._assert_ok(self._rpc("fleetflow.credential", "create", [{
+            "name": "tok-cred", "doc_kind": "driver_licence",
+            "company_id": self.company.id, "driver_id": self.driver.id,
+            "attachment_id": att_id}]))
+        # The pre-binding token no longer serves the file, even unauthenticated.
+        self.url_open("/web/session/logout", timeout=30)
+        resp = self.url_open("/web/content/%s?access_token=%s" % (att_id, old_token), timeout=30)
+        self.assertNotIn(PDF, resp.content)
+
+    # ------------------------------------------------------------------
+    # B14 -- a reviewer allowed in BOTH internal companies cannot transfer an
+    #        existing approval between them (E03).
+    # ------------------------------------------------------------------
+    def test_B14_two_company_reviewer_cannot_transfer_approval(self):
+        self.authenticate("http.twoco", PW)
+        self._assert_denied(self._rpc("fleetflow.channel.enrolment", "write",
+                                      [[self.enr_d.id], {"company_id": self.other_company.id}]))
+        self.enr_d.invalidate_recordset()
+        self.assertEqual(self.enr_d.company_id, self.company)
+
+    # ------------------------------------------------------------------
+    # B15 -- default_state context cannot manufacture an approved enrolment (E04).
+    # ------------------------------------------------------------------
+    def test_B15_default_state_context_cannot_forge_approval(self):
+        self.authenticate("http.disp", PW)
+        for st in ("approved", "suspended", "rejected"):
+            enr_id = self._assert_ok(self._rpc(
+                "fleetflow.channel.enrolment", "create",
+                [{"company_id": self.company.id, "channel": "careem",
+                  "product": "B15-%s" % st, "driver_id": self.driver.id}],
+                {"context": {"default_state": st}}))
+            enr = self.env["fleetflow.channel.enrolment"].browse(enr_id)
+            enr.invalidate_recordset()
+            self.assertEqual(enr.state, "pending")
+            self.assertFalse(enr.verified_as_of)
