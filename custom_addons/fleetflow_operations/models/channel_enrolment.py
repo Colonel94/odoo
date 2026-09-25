@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from odoo import api, fields, models, _
-from odoo.exceptions import AccessError, ValidationError
+from odoo.exceptions import AccessError, UserError, ValidationError
 
 from . import constants
 
@@ -71,13 +71,26 @@ class FleetflowChannelEnrolment(models.Model):
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
-            # A new enrolment is always pending with no verification attribution,
-            # whatever the caller or default_* context supplies (set explicitly,
-            # not pop, so a default_state key cannot refill it).
-            if vals.get("state") in self._REVIEWED_STATES:
-                vals["state"] = "pending"
+            # A new enrolment is ALWAYS pending with no verification attribution,
+            # whatever the caller or default_* context supplies. Set explicitly
+            # (not conditionally) so a default_state=approved/suspended/rejected
+            # context key, or an omitted state relying on a forged default, cannot
+            # produce a reviewed enrolment. Corrections are new pending revisions.
+            vals["state"] = "pending"
             vals["verified_as_of"] = False
         return super().create(vals_list)
+
+    def unlink(self):
+        # A reviewed enrolment (approved/suspended/rejected) is decision history;
+        # only a pending one may be deleted. Superuser (fixtures) is exempt.
+        if not self.env.su:
+            for rec in self:
+                if rec.state in self._REVIEWED_STATES:
+                    raise UserError(_(
+                        "Enrolment %s is %s and is retained as history; it cannot "
+                        "be deleted. Suspend/reject it instead."
+                    ) % (rec.name, rec.state))
+        return super().unlink()
 
     def write(self, vals):
         if self._PROTECTED & set(vals):

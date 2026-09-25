@@ -176,3 +176,61 @@ class TestBoundaryAuthority(OperationsCase):
         self.assertEqual(hold.cleared_by, self.fleet_manager)
         self.assertTrue(hold.cleared_on)
         self.assertEqual(hold.clear_note, "inspected and repaired")
+
+    # -- E03: extended decision-bearing fields + no deletion of history --
+    def test_verified_authorization_company_and_scope_frozen(self):
+        auth = self.make_authorization("chauffeur")
+        for vals in ({"company_id": self.other_company.id}, {"jurisdiction": "Sharjah"}):
+            with self.assertRaises(UserError), self.cr.savepoint():
+                auth.with_user(self.compliance).write(vals)
+        auth.invalidate_recordset()
+        self.assertEqual(auth.company_id, self.company)
+
+    def test_published_profile_company_and_provenance_frozen(self):
+        prof = self.env["fleetflow.operating.profile"].search([
+            ("state", "=", "published"), ("operating_mode", "=", "chauffeur")], limit=1)
+        for vals in ({"company_id": self.other_company.id}, {"source_ref": "forged"},
+                     {"source_version": "9"}):
+            with self.assertRaises(UserError), self.cr.savepoint():
+                prof.with_user(self.compliance).write(vals)
+
+    def test_reviewed_records_cannot_be_deleted_by_reviewer(self):
+        auth = self.make_authorization("rental")
+        with self.assertRaises(UserError), self.cr.savepoint():
+            auth.with_user(self.compliance).unlink()
+        prof = self.env["fleetflow.operating.profile"].search([
+            ("state", "=", "published")], limit=1)
+        with self.assertRaises(UserError), self.cr.savepoint():
+            prof.with_user(self.compliance).unlink()
+        enr = self._uber("driver_id", self.driver)
+        with self.assertRaises(UserError), self.cr.savepoint():
+            enr.with_user(self.fleet_manager).unlink()
+
+    def test_two_company_reviewer_cannot_transfer_an_approval(self):
+        both = self.env["res.users"].with_context(no_reset_password=True).create({
+            "name": "two-co reviewer", "login": "ff.twoco",
+            "email": "ff.twoco@example.com", "company_id": self.company.id,
+            "company_ids": [(6, 0, [self.company.id, self.other_company.id])],
+            "groups_id": [(6, 0, [self.env.ref(
+                "fleetflow_operations.group_ops_compliance").id])]})
+        enr = self._uber("driver_id", self.driver)  # approved in company A
+        with self.assertRaises(AccessError), self.cr.savepoint():
+            enr.with_user(both).write({"company_id": self.other_company.id})
+        enr.invalidate_recordset()
+        self.assertEqual(enr.company_id, self.company)
+
+    # -- E04: default context / copy cannot manufacture reviewed state ---
+    def test_channel_default_state_context_cannot_forge_approval(self):
+        for st in ("approved", "suspended", "rejected"):
+            enr = self.env["fleetflow.channel.enrolment"].with_context(
+                default_state=st).create({
+                "company_id": self.company.id, "channel": "careem",
+                "product": "CX-%s" % st, "driver_id": self.driver.id})
+            self.assertEqual(enr.state, "pending")
+            self.assertFalse(enr.verified_as_of)
+
+    def test_copy_of_approved_enrolment_starts_pending(self):
+        enr = self._uber("driver_id", self.driver)
+        clone = enr.copy({"product": "UberX-copy"})
+        self.assertEqual(clone.state, "pending")
+        self.assertFalse(clone.verified_as_of)

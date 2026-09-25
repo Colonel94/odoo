@@ -69,7 +69,8 @@ class FleetflowOperatingProfile(models.Model):
     # basis of confirmed decisions and cannot change under them. Corrections are
     # made by publishing a NEW version, never by editing a published one.
     _FROZEN_FIELDS = {
-        "operating_mode", "channel", "product", "version",
+        "company_id", "operating_mode", "channel", "product", "version",
+        "source_ref", "source_version",
         "require_operating_authorization", "require_vehicle_registration",
         "require_insurance", "require_inspection", "require_tracking_cert",
         "require_driver_licence", "require_professional_permit",
@@ -109,6 +110,18 @@ class FleetflowOperatingProfile(models.Model):
                         "and publish it; a published version is never edited in "
                         "place.") % (rec.name, rec.state))
         return super().write(vals)
+
+    def unlink(self):
+        # A published/archived policy version is the basis of confirmed decisions
+        # and is retained; only an unused draft may be deleted. Superuser exempt.
+        if not self.env.su:
+            for rec in self:
+                if rec.state in ("published", "archived"):
+                    raise UserError(_(
+                        "Policy version %s is %s and is retained; it cannot be "
+                        "deleted. Publish a superseding version instead."
+                    ) % (rec.name, rec.state))
+        return super().unlink()
 
     def _apply(self, vals):
         return super().write(vals)

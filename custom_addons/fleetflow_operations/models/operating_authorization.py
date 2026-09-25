@@ -58,13 +58,47 @@ class FleetflowOperatingAuthorization(models.Model):
     # actions; a direct write (even by a compliance user) cannot forge them, and
     # a verified permit's scope/dates are frozen (corrections re-verify).
     _PROTECTED = {"verified_by", "verified_on"}
-    _FROZEN = {"operating_mode", "jurisdiction", "activity", "date_start", "date_end", "open_ended"}
+    # Once verified, the whole reviewed claim is frozen: operator/company, scope,
+    # dates AND the supporting evidence link/provenance. A correction re-verifies
+    # a new record; it never mutates a verified one in place.
+    _FROZEN = {"company_id", "operating_mode", "jurisdiction", "activity",
+               "date_start", "date_end", "open_ended", "evidence_id"}
 
     @api.constrains("date_start", "date_end")
     def _check_dates(self):
         for rec in self:
             if rec.date_start and rec.date_end and rec.date_end < rec.date_start:
                 raise ValidationError(_("Authorization %s ends before it starts.") % rec.name)
+
+    @api.constrains("evidence_id", "company_id", "operating_mode")
+    def _check_evidence_scope(self):
+        """When supporting evidence is linked it must be an operator credential of
+        the SAME company -- an authorization cannot borrow another company's or a
+        vehicle/driver document as its proof. Evidence is not required here (that
+        stays open), but a wrong-scope link is rejected."""
+        for rec in self:
+            ev = rec.evidence_id
+            if not ev:
+                continue
+            if ev.company_id != rec.company_id:
+                raise ValidationError(_(
+                    "Supporting evidence for %s must belong to the same company.") % rec.name)
+            if ev.subject_kind not in ("operator", False):
+                raise ValidationError(_(
+                    "Supporting evidence for %s must be an operator/company document.") % rec.name)
+
+    def unlink(self):
+        # Only a genuinely unused draft/pending authorization may be deleted; a
+        # once-reviewed one is history and is withdrawn, not erased. Superuser
+        # (fixtures/migration) is exempt.
+        if not self.env.su:
+            for rec in self:
+                if rec.state not in ("draft", "pending"):
+                    raise UserError(_(
+                        "Authorization %s is %s and is retained as history; it "
+                        "cannot be deleted. Reject/withdraw it instead."
+                    ) % (rec.name, rec.state))
+        return super().unlink()
 
     @api.model_create_multi
     def create(self, vals_list):
