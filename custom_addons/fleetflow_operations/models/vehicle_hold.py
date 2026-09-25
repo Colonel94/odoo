@@ -62,6 +62,13 @@ class FleetflowVehicleHold(models.Model):
             )
 
     _PROTECTED = {"state", "cleared_by", "cleared_on", "clear_note"}
+    # A hold's subject, severity and source ARE its history. They are fixed at
+    # creation: a dispatch-blocking hold is not silently moved to another vehicle,
+    # downgraded to non-blocking, or have its recorded reason/source rewritten. It
+    # is cleared through the authorized action (with a reason), or a new hold is
+    # created. Superuser (fixtures/migration) is exempt.
+    _IMMUTABLE = {"vehicle_id", "hold_type", "reason", "dispatch_blocking",
+                  "source_work_order_id", "source_allocation_id", "reference"}
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -84,7 +91,22 @@ class FleetflowVehicleHold(models.Model):
             raise AccessError(_(
                 "A hold is cleared through the Clear action (with a note), not by "
                 "a direct edit."))
+        if self._IMMUTABLE & set(vals) and not self.env.su:
+            raise AccessError(_(
+                "A hold's vehicle, type, reason, blocking flag and source are fixed "
+                "once created. Clear it (with a reason) or create a new hold; they "
+                "are not editable in place."))
         return super().write(vals)
+
+    def unlink(self):
+        # A hold is decision-bearing history: deleting it must never be an
+        # alternative to clearing it (which is attributable). Only superuser
+        # (fixtures/migration/teardown) may remove one.
+        if not self.env.su:
+            raise UserError(_(
+                "A hold is permanent history and cannot be deleted; clear it with "
+                "a reason instead."))
+        return super().unlink()
 
     def _apply(self, vals):
         return super().write(vals)

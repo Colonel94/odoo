@@ -77,11 +77,30 @@ class FleetflowOperatingProfile(models.Model):
         "enforce_end_of_use", "channel_freshness_days",
     }
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            # A profile is authored as a draft and published only through the
+            # Publish action; create/import/default_* cannot fabricate a published
+            # policy version.
+            if vals.get("state") not in ("draft",):
+                vals["state"] = "draft"
+        return super().create(vals_list)
+
     def write(self, vals):
         if vals.get("state") == "published":
             raise AccessError(_(
                 "Publish a profile through the Publish action, which archives the "
                 "prior version; the published state is not set by a direct write."))
+        # A published/archived policy version's state is frozen too: it cannot be
+        # reverted to draft and re-published in place (which would rewrite the
+        # historical version confirmed decisions rely on). Publish a NEW version.
+        if "state" in vals and not self.env.su:
+            for rec in self:
+                if rec.state in ("published", "archived"):
+                    raise UserError(_(
+                        "Policy version %s is %s; publish a new version rather than "
+                        "changing this one's state.") % (rec.name, rec.state))
         if self._FROZEN_FIELDS & set(vals):
             for rec in self:
                 if rec.state in ("published", "archived"):

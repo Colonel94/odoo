@@ -53,7 +53,7 @@ class FleetVehicle(models.Model):
              "price or badge.",
     )
     ff_authorized_end_of_use = fields.Date(
-        string="Authorised end-of-use",
+        string="Authorised end-of-use", copy=False,
         help="Individually authorised end-of-use date from official evidence, "
              "when known. Absence does not imply any generic age limit.",
     )
@@ -123,6 +123,23 @@ class FleetVehicle(models.Model):
     _FF_REVIEW_FIELDS = {"ff_operational_state", "ff_authorized_end_of_use",
                          "ff_end_of_use_exempt", "ff_end_of_use_reviewed_by",
                          "ff_end_of_use_reviewed_on"}
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        # A vehicle is created operationally UNREVIEWED with no age determination,
+        # whatever the caller, copy or default_* context supplies: the reviewed
+        # state and end-of-use exemption are compliance actions, never forgeable at
+        # creation/import/copy by an ordinary user. Values are set explicitly (not
+        # popped) so a default_<field> context key cannot refill them. Superuser
+        # (fixtures/migration) may seed a reviewed state deliberately.
+        if not self.env.su:
+            for vals in vals_list:
+                vals["ff_operational_state"] = "unreviewed"
+                vals["ff_end_of_use_exempt"] = False
+                vals["ff_end_of_use_reviewed_by"] = False
+                vals["ff_end_of_use_reviewed_on"] = False
+                vals["ff_authorized_end_of_use"] = False
+        return super().create(vals_list)
 
     def write(self, vals):
         forbidden = self._FF_REVIEW_FIELDS & set(vals)

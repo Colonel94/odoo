@@ -9,3 +9,4 @@ from . import test_amendment_checkout
 from . import test_eligibility
 from . import test_false_green
 from . import test_privacy_custody
+from . import test_boundary_authority

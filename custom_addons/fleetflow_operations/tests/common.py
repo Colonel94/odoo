@@ -72,10 +72,11 @@ class OperationsCase(TransactionCase):
             auth.with_user(self.compliance).action_verify()
         return auth
 
-    def make_channel(self, channel, product, subject_field, subject, state="approved", fresh=True):
+    def make_channel(self, channel, product, subject_field, subject, state="approved",
+                     fresh=True, city="Dubai"):
         enr = self.env["fleetflow.channel.enrolment"].create({
             "company_id": self.company.id, "channel": channel, "product": product,
-            subject_field: subject.id,
+            "city": city, subject_field: subject.id,
         })
         # Approval status is reviewer-set; go through the compliance actions.
         if state == "approved":

@@ -66,6 +66,17 @@ class FleetflowOperatingAuthorization(models.Model):
             if rec.date_start and rec.date_end and rec.date_end < rec.date_start:
                 raise ValidationError(_("Authorization %s ends before it starts.") % rec.name)
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        for vals in vals_list:
+            # A new authorization never starts verified and carries no verification
+            # attribution, whatever the caller or default_* context supplies.
+            vals["verified_by"] = False
+            vals["verified_on"] = False
+            if vals.get("state") not in ("draft", "pending"):
+                vals["state"] = "draft"
+        return super().create(vals_list)
+
     def write(self, vals):
         if self._PROTECTED & set(vals):
             raise AccessError(_(
@@ -75,12 +86,22 @@ class FleetflowOperatingAuthorization(models.Model):
             raise AccessError(_(
                 "An authorization's verified/rejected state is set through the "
                 "review actions, not a direct write."))
+        # A verified/rejected/expired authorization is historical: it cannot be
+        # downgraded to draft/pending by a direct write and re-verified in place.
+        # A correction is a new record re-verified afresh. Superuser is exempt.
+        if "state" in vals and not self.env.su:
+            for rec in self:
+                if rec.state in ("verified", "rejected", "expired"):
+                    raise AccessError(_(
+                        "Authorization %s is %s; its state cannot change by a "
+                        "direct write. Re-verify a correction as a new record."
+                    ) % (rec.name, rec.state))
         if self._FROZEN & set(vals):
             for rec in self:
-                if rec.state == "verified":
+                if rec.state in ("verified", "rejected", "expired"):
                     raise UserError(_(
-                        "Verified authorization %s is locked. Re-verify a "
-                        "correction rather than editing it in place.") % rec.name)
+                        "Authorization %s is %s and locked. Re-verify a correction "
+                        "as a new record rather than editing it in place.") % (rec.name, rec.state))
         return super().write(vals)
 
     def _apply(self, vals):

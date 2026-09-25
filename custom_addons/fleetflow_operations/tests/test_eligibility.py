@@ -47,8 +47,13 @@ class TestEligibility(OperationsCase):
         self.assertEqual(result["status"], constants.READY, self._codes(result))
 
     def test_wrong_city_enrolment_does_not_satisfy(self):
-        for enr in self.env["fleetflow.channel.enrolment"].search([("channel", "=", "uber")]):
-            enr.write({"city": "Abu Dhabi"})
+        # A reviewed enrolment's city is frozen (it is part of what was approved),
+        # so build the approvals for the WRONG city instead of re-pointing the
+        # Dubai ones: a Dubai request is then not covered.
+        self._uber("vehicle_id", self.vehicle).unlink()
+        self._uber("driver_id", self.driver).unlink()
+        self.make_channel("uber", "UberX", "vehicle_id", self.vehicle, city="Abu Dhabi")
+        self.make_channel("uber", "UberX", "driver_id", self.driver, city="Abu Dhabi")
         result = self.evaluate(user=self.dispatcher)  # request city defaults to Dubai
         self.assertNotEqual(result["status"], constants.READY)
         self.assertIn("channel_missing", self._codes(result))

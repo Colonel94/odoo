@@ -139,17 +139,30 @@ class FleetflowCredential(models.Model):
             raise AccessError(_(
                 "Use Verify to record a verified state; it cannot be set directly."
             ))
-        # A verified document is immutable except through supersession.
+        # A verified/superseded/rejected record is historical: it cannot be
+        # downgraded to draft/pending by a direct write and then re-edited and
+        # re-verified (the "draft detour" that would rewrite an approved claim).
+        # A correction is an explicit new revision (supersede), never an in-place
+        # rewrite of the same historical record. Superuser is exempt.
+        if "state" in vals and not self.env.su:
+            for rec in self:
+                if rec.state in ("verified", "superseded", "rejected"):
+                    raise AccessError(_(
+                        "Evidence %s is %s; its state cannot change by a direct "
+                        "write. Supersede it with a new revision instead."
+                    ) % (rec.name, rec.state))
+        # A verified/superseded/rejected document's content is immutable except
+        # through supersession (a new attributable revision).
         frozen = {"doc_kind", "operator_company_id", "vehicle_id", "driver_id",
                   "date_start", "date_end", "date_precision", "open_ended",
                   "reference", "issuer", "attachment_id"}
         if frozen & set(vals):
             for rec in self:
-                if rec.state in ("verified", "superseded"):
+                if rec.state in ("verified", "superseded", "rejected"):
                     raise UserError(_(
-                        "Verified evidence %s is locked. Supersede it with a renewal "
+                        "Evidence %s is %s and locked. Supersede it with a renewal "
                         "instead of editing it."
-                    ) % rec.name)
+                    ) % (rec.name, rec.state))
         res = super().write(vals)
         if "attachment_id" in vals:
             self._bind_attachment()
@@ -160,15 +173,70 @@ class FleetflowCredential(models.Model):
         # write guard by writing at the ORM level.
         return super().write(vals)
 
+    # Evidence document policy: allowed types (validated on the real bytes, not
+    # the filename) and a hard size ceiling. Active/script content is rejected.
+    _EVIDENCE_MAX_BYTES = 15 * 1024 * 1024
+    _EVIDENCE_MAGIC = (
+        (b"%PDF-", "PDF"),
+        (b"\xff\xd8\xff", "JPEG"),
+        (b"\x89PNG\r\n\x1a\n", "PNG"),
+    )
+
     def _bind_attachment(self):
-        """Bind a linked document file to THIS credential and make it private, so
-        the compliance-only file restriction (ir.attachment.check) actually
-        applies. A file referenced through attachment_id can therefore never be a
-        loose, public or foreign-owned attachment that side-steps the guard."""
+        """Safely bind a linked document file to THIS credential.
+
+        There is NO blanket sudo reparenting of an arbitrary attachment id. Before
+        anything is changed we verify -- with the CALLER's own rights, never sudo
+        -- that the file is theirs to bind: the caller can write it, it is either
+        unbound or already this credential's, it belongs to this company, it is not
+        the source of other verified evidence, and it passes the type/size/content
+        policy. A file that fails any check is rejected and left completely
+        unchanged (owner, binding, bytes, public flag and access token intact).
+        Only after every check passes is the file privatised and pinned here.
+        """
         for rec in self:
-            if rec.attachment_id:
-                rec.attachment_id.sudo().write({
-                    "res_model": rec._name, "res_id": rec.id, "public": False})
+            att = rec.attachment_id
+            if not att:
+                continue
+            # 1) The caller must be able to write the source file. This runs as
+            #    the caller: another user's private upload, or an id they cannot
+            #    access, raises here and nothing is modified.
+            att.check("write")
+            att_su = att.sudo()
+            # 2) Unbound, or already bound to THIS credential -- never reparent a
+            #    file that already belongs to another record.
+            if att_su.res_model and not (
+                    att_su.res_model == rec._name and att_su.res_id == rec.id):
+                raise UserError(_(
+                    "That file is already attached to another record and cannot be "
+                    "reused as evidence. Upload the document to this credential."))
+            # 3) Company ownership must match.
+            if att_su.company_id and att_su.company_id.id != rec.company_id.id:
+                raise UserError(_("That file belongs to another company."))
+            # 4) Type / size / actual-content policy.
+            rec._validate_evidence_file(att_su)
+            # Passed: privatise, drop any public token and pin ownership here.
+            att_su.write({
+                "res_model": rec._name, "res_id": rec.id,
+                "company_id": rec.company_id.id, "public": False,
+                "access_token": False,
+            })
+        return True
+
+    def _validate_evidence_file(self, att_su):
+        """Reject empty, oversized or non-document (active/script) content, judged
+        on the real bytes rather than the filename/extension."""
+        import base64
+        data = att_su.raw or (base64.b64decode(att_su.datas) if att_su.datas else b"")
+        if not data:
+            raise UserError(_("The evidence file is empty."))
+        if len(data) > self._EVIDENCE_MAX_BYTES:
+            raise UserError(_("The evidence file exceeds the %d MB limit.")
+                            % (self._EVIDENCE_MAX_BYTES // (1024 * 1024)))
+        if not any(data.startswith(magic) for magic, _label in self._EVIDENCE_MAGIC):
+            raise UserError(_(
+                "Evidence must be a PDF, JPEG or PNG document; active or script "
+                "content is not accepted."))
         return True
 
     def _require_compliance(self):

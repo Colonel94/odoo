@@ -60,10 +60,20 @@ class FleetflowChannelEnrolment(models.Model):
     # reviewer actions -- never a direct write/create (no context flag opts out).
     _PROTECTED = {"verified_as_of"}
     _REVIEWED_STATES = ("approved", "suspended", "rejected")
+    # Once reviewed, the IDENTITY of the approval is frozen: the subject, the
+    # operator and the city/channel/product scope and the backing evidence define
+    # WHAT was reviewed. A correction is a new enrolment reviewed afresh, never an
+    # in-place edit that keeps the old approval attached to new facts. (This is a
+    # hard invariant -- not even superuser edits a reviewed enrolment's identity.)
+    _SCOPE_FROZEN = {"channel", "product", "city", "company_id", "vehicle_id",
+                     "driver_id", "evidence_id"}
 
     @api.model_create_multi
     def create(self, vals_list):
         for vals in vals_list:
+            # A new enrolment is always pending with no verification attribution,
+            # whatever the caller or default_* context supplies (set explicitly,
+            # not pop, so a default_state key cannot refill it).
             if vals.get("state") in self._REVIEWED_STATES:
                 vals["state"] = "pending"
             vals["verified_as_of"] = False
@@ -74,11 +84,52 @@ class FleetflowChannelEnrolment(models.Model):
             raise AccessError(_(
                 "The platform status verification timestamp is set by the review "
                 "actions, not a direct edit."))
-        if vals.get("state") in self._REVIEWED_STATES:
+        # The approval status moves ONLY through the reviewer actions, in either
+        # direction: a suspended enrolment cannot be quietly reset to pending, and
+        # an approval cannot be forged, by a plain write. (Superuser fixtures and
+        # migrations are exempt; the action methods write via _apply.)
+        if "state" in vals and not self.env.su:
             raise AccessError(_(
                 "A channel enrolment's approval status is set through the review "
                 "actions (approve/suspend/reject), not a direct write."))
+        if self._SCOPE_FROZEN & set(vals):
+            for rec in self:
+                if rec.state in self._REVIEWED_STATES:
+                    raise AccessError(_(
+                        "Enrolment %s is %s; its reviewed subject and scope are "
+                        "frozen. Create a new enrolment for a change and have it "
+                        "reviewed -- do not re-point an existing approval."
+                    ) % (rec.name, rec.state))
+        # The recheck date is a reviewer freshness control: on a reviewed
+        # enrolment a dispatcher must not push it out to fake freshness. Only a
+        # compliance reviewer (or superuser) may change it once reviewed.
+        if "recheck_date" in vals and not self.env.su and not self.env.user.has_group(
+                "fleetflow_operations.group_ops_compliance"):
+            for rec in self:
+                if rec.state in self._REVIEWED_STATES:
+                    raise AccessError(_(
+                        "The recheck date on a reviewed enrolment is set by a "
+                        "compliance reviewer, not by a direct edit."))
         return super().write(vals)
+
+    @api.constrains("evidence_id", "vehicle_id", "driver_id", "company_id")
+    def _check_evidence_scope(self):
+        """When approval evidence is linked, it must be evidence of the SAME
+        subject and company -- an approval can never borrow another subject's or
+        another company's document as its backing proof."""
+        for rec in self:
+            ev = rec.evidence_id
+            if not ev:
+                continue
+            if ev.company_id != rec.company_id:
+                raise ValidationError(_(
+                    "Approval evidence for %s must belong to the same company.") % rec.name)
+            if rec.vehicle_id and ev.vehicle_id != rec.vehicle_id:
+                raise ValidationError(_(
+                    "Approval evidence for %s must reference the same vehicle.") % rec.name)
+            if rec.driver_id and ev.driver_id != rec.driver_id:
+                raise ValidationError(_(
+                    "Approval evidence for %s must reference the same driver.") % rec.name)
 
     def _apply(self, vals):
         return super().write(vals)
