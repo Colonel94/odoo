@@ -46,21 +46,9 @@ class TestPrivacyCustody(OperationsCase):
             att.with_user(self.dispatcher).check("read")
         att.with_user(self.compliance).check("read")  # compliance may
 
-    def test_foreign_attachment_is_rebound_when_linked(self):
-        # A file initially bound elsewhere (or public) cannot be smuggled in as a
-        # credential file that side-steps the restriction: linking rebinds it.
-        att = self.env["ir.attachment"].create({
-            "name": "x.pdf", "raw": b"%PDF", "public": True,
-            "res_model": "res.partner", "res_id": self.env.user.partner_id.id})
-        cred = self.env["fleetflow.credential"].create({
-            "name": "L2", "doc_kind": "insurance", "company_id": self.company.id,
-            "vehicle_id": self.vehicle.id, "attachment_id": att.id})
-        att.invalidate_recordset(["res_model", "res_id", "public"])
-        self.assertEqual(att.res_model, "fleetflow.credential")
-        self.assertEqual(att.res_id, cred.id)
-        self.assertFalse(att.public)
-        with self.assertRaises(AccessError):
-            att.with_user(self.dispatcher).check("read")
+    # NOTE: the reject-vs-reparent behaviour for a foreign/already-bound file now
+    # lives in test_document_ownership.py (R03). Binding no longer silently steals
+    # another record's attachment; it is rejected and the original left unchanged.
 
     def test_dispatcher_cannot_read_sensitive_fields(self):
         cred = self.env["fleetflow.credential"].create({
