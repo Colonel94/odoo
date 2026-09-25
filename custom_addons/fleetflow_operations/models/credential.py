@@ -57,6 +57,18 @@ class FleetflowCredential(models.Model):
     )
     verified_by = fields.Many2one("res.users", readonly=True, copy=False)
     verified_on = fields.Datetime(readonly=True, copy=False)
+    # Durable marker: this evidence backed an approved decision at some point. It
+    # is set at first verification and NEVER cleared, so its source file stays
+    # protected through rejection, supersession, expiry or archival -- protection
+    # is not based on the current state alone.
+    ever_verified = fields.Boolean(readonly=True, copy=False, default=False)
+    # Revocation/rejection attribution, recorded SEPARATELY from verification so a
+    # rejection never overwrites who originally approved the evidence.
+    revoked_by = fields.Many2one("res.users", readonly=True, copy=False)
+    revoked_on = fields.Datetime(readonly=True, copy=False)
+    revoke_reason = fields.Text(readonly=True, copy=False)
+    # When this record's coverage was effectively taken over by its successor.
+    replaced_on = fields.Datetime(readonly=True, copy=False)
 
     attachment_id = fields.Many2one(
         "ir.attachment", string="Document file", copy=False,
@@ -68,7 +80,9 @@ class FleetflowCredential(models.Model):
         groups="fleetflow_operations.group_ops_compliance,fleetflow_operations.group_ops_fleet_manager")
 
     # Fields that may never be forged through create/write/import/context.
-    _PROTECTED = {"verified_by", "verified_on", "superseded_by_id", "supersedes_id"}
+    _PROTECTED = {"verified_by", "verified_on", "superseded_by_id", "supersedes_id",
+                  "ever_verified", "revoked_by", "revoked_on", "revoke_reason",
+                  "replaced_on"}
 
     @api.depends("operator_company_id", "vehicle_id", "driver_id")
     def _compute_subject_kind(self):
@@ -168,6 +182,20 @@ class FleetflowCredential(models.Model):
             self._bind_attachment()
         return res
 
+    def unlink(self):
+        # Evidence that has ever backed an approved decision (or is not a plain
+        # unused draft/pending upload) is retained as history and cannot be
+        # deleted -- deletion is never an alternative to revocation/supersession.
+        # Superuser (fixtures/migration) is exempt.
+        if not self.env.su:
+            for rec in self:
+                if rec.ever_verified or rec.state not in ("draft", "pending"):
+                    raise UserError(_(
+                        "Evidence %s has been reviewed and is retained as history; "
+                        "it cannot be deleted. Reject/supersede it instead."
+                    ) % rec.name)
+        return super().unlink()
+
     def _apply(self, vals):
         # Internal transition used by the review actions; bypasses the public
         # write guard by writing at the ORM level.
@@ -223,9 +251,17 @@ class FleetflowCredential(models.Model):
             })
         return True
 
+    # Interactive/active PDF constructs that have no place in static evidence.
+    _PDF_BANNED = (b"/JavaScript", b"/JS", b"/Launch", b"/OpenAction", b"/AA",
+                   b"/EmbeddedFile", b"/RichMedia", b"/AcroForm")
+    _IMAGE_MAX_PIXELS = 40_000_000  # bounded decompression (header dimensions)
+
     def _validate_evidence_file(self, att_su):
-        """Reject empty, oversized or non-document (active/script) content, judged
-        on the real bytes rather than the filename/extension."""
+        """Reject empty, oversized or non-document content, judged on the real
+        bytes -- a valid-looking prefix is not enough. PDFs are structurally
+        sanity-checked and rejected if they carry active/embedded content; images
+        are parsed (header only) with a bounded pixel budget. This is a document
+        policy, not a malware scanner, and never executes the content."""
         import base64
         data = att_su.raw or (base64.b64decode(att_su.datas) if att_su.datas else b"")
         if not data:
@@ -233,11 +269,42 @@ class FleetflowCredential(models.Model):
         if len(data) > self._EVIDENCE_MAX_BYTES:
             raise UserError(_("The evidence file exceeds the %d MB limit.")
                             % (self._EVIDENCE_MAX_BYTES // (1024 * 1024)))
-        if not any(data.startswith(magic) for magic, _label in self._EVIDENCE_MAGIC):
+        kind = next((label for magic, label in self._EVIDENCE_MAGIC
+                     if data.startswith(magic)), None)
+        if not kind:
             raise UserError(_(
                 "Evidence must be a PDF, JPEG or PNG document; active or script "
                 "content is not accepted."))
+        if kind == "PDF":
+            self._validate_pdf_bytes(data)
+        else:
+            self._validate_image_bytes(data)
         return True
+
+    def _validate_pdf_bytes(self, data):
+        if b"%%EOF" not in data[-4096:]:
+            raise UserError(_(
+                "The PDF is malformed (no end-of-file marker); a valid-looking "
+                "prefix is not a valid document."))
+        for tok in self._PDF_BANNED:
+            if tok in data:
+                raise UserError(_(
+                    "The PDF carries active or embedded content (%s), which is not "
+                    "allowed in evidence.") % tok.decode())
+
+    def _validate_image_bytes(self, data):
+        try:
+            import io
+            from PIL import Image
+            img = Image.open(io.BytesIO(data))
+            width, height = img.size
+            if width * height > self._IMAGE_MAX_PIXELS:
+                raise UserError(_("The image dimensions exceed the allowed limit."))
+            img.verify()  # structural integrity, no full pixel decode
+        except UserError:
+            raise
+        except Exception:
+            raise UserError(_("The image file is malformed or unsupported."))
 
     def _require_compliance(self):
         if not (self.env.user.has_group("fleetflow_operations.group_ops_compliance") or self.env.su):
@@ -248,16 +315,32 @@ class FleetflowCredential(models.Model):
         for rec in self:
             if rec.state not in ("draft", "pending"):
                 raise UserError(_("Only draft/pending evidence can be verified (%s).") % rec.name)
+        now = fields.Datetime.now()
+        # Re-validate the source file against its CURRENT bytes immediately before
+        # verifying, under a row lock. This closes two gaps: a file edited after
+        # linking cannot slip past the approval-time policy, and a concurrent
+        # mutation cannot leave verified evidence pointing at different bytes (once
+        # verified, ever_verified freezes the source so no later write can diverge).
+        for rec in self:
+            if rec.attachment_id:
+                self.env.cr.execute(
+                    "SELECT id FROM ir_attachment WHERE id = %s FOR UPDATE",
+                    (rec.attachment_id.id,))
+                rec.attachment_id.invalidate_recordset(["raw", "datas"])
+                rec._validate_evidence_file(rec.attachment_id.sudo())
         self._apply({
-            "state": "verified", "verified_by": self.env.uid, "verified_on": fields.Datetime.now(),
+            "state": "verified", "verified_by": self.env.uid, "verified_on": now,
+            "ever_verified": True,
         })
-        # A verified renewal now takes over from the document it supersedes. The
-        # predecessor stayed effective until this moment, so merely drafting a
-        # renewal never opened a coverage gap.
+        # A verified renewal takes over from the document it supersedes -- but only
+        # the RELATIONSHIP is recorded here; coverage is decided per requested
+        # interval by effective dates (see _validity). A future-effective renewal
+        # therefore does not remove the predecessor's still-valid current coverage.
         for rec in self:
             predecessor = rec.supersedes_id
             if predecessor and predecessor.state == "verified":
-                predecessor._apply({"state": "superseded", "superseded_by_id": rec.id})
+                predecessor._apply({"state": "superseded", "superseded_by_id": rec.id,
+                                    "replaced_on": now})
         self._bump_subject_locks()
         return True
 
@@ -271,10 +354,19 @@ class FleetflowCredential(models.Model):
         self.filtered(lambda r: r.state == "draft").write({"state": "pending"})
         return True
 
-    def action_reject(self):
+    def action_reject(self, reason=None):
+        """Reject a pending upload, or revoke a previously verified document.
+
+        Revocation records its OWN actor/time/reason and never overwrites the
+        original verification attribution. A once-verified record keeps
+        ever_verified=True, so revoking it neither unlocks its source file nor
+        resurrects its coverage (a rejected record provides no coverage)."""
         self._require_compliance()
+        reason = reason or self.env.context.get("revoke_reason")
         self._apply({
-            "state": "rejected", "verified_by": self.env.uid, "verified_on": fields.Datetime.now(),
+            "state": "rejected", "revoked_by": self.env.uid,
+            "revoked_on": fields.Datetime.now(),
+            "revoke_reason": reason or _("(no reason recorded)"),
         })
         self._bump_subject_locks()
         return True
@@ -304,7 +396,10 @@ class FleetflowCredential(models.Model):
         vals[subject_field] = self[subject_field].id
         renewal = self.create(vals)
         renewal._apply({"supersedes_id": self.id})
-        return renewal
+        # Return a serializable id (not a recordset) so the workflow can be driven
+        # through the authenticated JSON-RPC API and the caller can load the
+        # renewal without injecting the protected supersedes link by hand.
+        return renewal.id
 
     # ------------------------------------------------------------------
     # Validity helpers (used by the readiness service)
@@ -334,7 +429,13 @@ class FleetflowCredential(models.Model):
         midnight.
         """
         self.ensure_one()
-        if self.state != "verified":
+        # Coverage is provided by a record that was legitimately approved and not
+        # revoked: 'verified' (current) or 'superseded' (replaced, but its own
+        # effective interval remains historically valid). A rejected/revoked or
+        # never-verified record provides NO coverage -- revoked coverage is never
+        # resurrected. The effective interval below then bounds it, so a
+        # future-effective renewal only covers its own window.
+        if self.state not in ("verified", "superseded"):
             return "not_verified"
         # An imprecise date cannot be trusted to a day-accurate boundary.
         if self.date_precision in ("year", "month", "unknown"):

@@ -74,10 +74,10 @@ class TestEvidence(OperationsCase):
             cred.write({"date_end": date.today() + timedelta(days=400)})
         # Supersede with a renewal; the old evidence stays effective until the
         # renewal is verified, so drafting a renewal never drops coverage.
-        renewal = cred.with_user(self.compliance).action_supersede({
+        renewal = cred.browse(cred.with_user(self.compliance).action_supersede({
             "name": "REG-renewal", "date_start": date.today(),
             "date_end": date.today() + timedelta(days=400),
-        })
+        }))
         self.assertEqual(renewal.state, "draft")
         self.assertEqual(cred.state, "verified")
         self.assertEqual(renewal.supersedes_id, cred)

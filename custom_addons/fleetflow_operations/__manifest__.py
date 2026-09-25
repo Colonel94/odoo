@@ -1,6 +1,6 @@
 {
     "name": "FleetFlow Operations",
-    "version": "16.0.1.0.0",
+    "version": "16.0.1.1.0",
     "category": "Operations/Fleet",
     "summary": "Dubai fleet operations: resource readiness, evidence, allocation and holds.",
     "description": """
@@ -51,4 +51,5 @@ research and source register behind the design.
     ],
     "application": True,
     "installable": True,
+    "post_init_hook": "post_init_hook",
 }

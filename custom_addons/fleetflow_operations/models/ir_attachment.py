@@ -17,10 +17,13 @@ class IrAttachment(models.Model):
        validity, state) to understand a blocker, but must not download the
        underlying private document (identity, licence, clearance). Only
        compliance reviewers and fleet managers may access the attached files.
-    2. Verified-source immutability: once a file is the source of verified (or
-       superseded) evidence, it cannot be overwritten, re-bound, made public,
-       tokenised or deleted through generic attachment operations. A correction
-       is a new evidence revision, not an in-place edit of the frozen source.
+    2. Approved-source immutability (durable): once a file has backed an approved
+       decision (the credential's ever_verified marker), it cannot be overwritten,
+       re-bound, made public, tokenised or deleted through generic attachment
+       operations -- and this survives rejection/revocation, supersession, expiry
+       and archival. Protection is keyed on that durable history, NOT on the
+       credential's current state, so revoking evidence never re-opens its source.
+       A correction is a new evidence revision, not an in-place edit.
 
     This only adds restrictions on credential attachments; unrelated Odoo
     mail/assets/attachments are untouched.
@@ -63,8 +66,11 @@ class IrAttachment(models.Model):
         return super().check(mode, values=values)
 
     def _ff_is_frozen_source(self, attachment_su):
+        # Durable: a file that has EVER backed an approved decision stays frozen,
+        # regardless of the credential's current state (rejected/revoked/expired/
+        # archived included). Rejection disables use; it never unlocks the source.
         cred = self.env["fleetflow.credential"].sudo().browse(attachment_su.res_id)
-        return bool(cred.exists()) and cred.state in ("verified", "superseded")
+        return bool(cred.exists()) and cred.ever_verified
 
     def write(self, vals):
         # Belt-and-suspenders around a frozen verified-evidence source: even a

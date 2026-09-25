@@ -122,10 +122,10 @@ class TestReadiness(OperationsCase):
         ins = self.make_credential("insurance", "vehicle_id", self.vehicle,
                                    end=date.today() - timedelta(days=1))
         self.assertEqual(self.evaluate(user=self.dispatcher)["status"], constants.BLOCKED)
-        renewal = ins.with_user(self.compliance).action_supersede({
+        renewal = ins.browse(ins.with_user(self.compliance).action_supersede({
             "name": "INS-renewal", "date_start": date.today() - timedelta(days=1),
             "date_end": date.today() + timedelta(days=365),
-        })
+        }))
         # The renewal is not yet verified; the old (expired) evidence still
         # stands, so the request stays blocked -- coverage is never opened by a
         # mere draft, nor is the still-listed old document ignored.

@@ -165,9 +165,9 @@ class TestLifecycleBypass(OperationsCase):
         drafted: the old evidence stays effective until the renewal is verified."""
         cred = self.make_credential("vehicle_registration", "vehicle_id", self.vehicle,
                                     end=date.today() + timedelta(days=10))
-        renewal = cred.with_user(self.compliance).action_supersede({
+        renewal = cred.browse(cred.with_user(self.compliance).action_supersede({
             "name": "REG-renew", "date_start": date.today(),
-            "date_end": date.today() + timedelta(days=400)})
+            "date_end": date.today() + timedelta(days=400)}))
         # Renewal is not yet verified -> old must remain the effective, verified one.
         self.assertEqual(renewal.state, "draft")
         self.assertEqual(cred.state, "verified")
