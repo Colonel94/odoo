@@ -1,5 +1,14 @@
 # OPS-1 — Dispatch-integrity correction evidence (review F01–F09)
 
+> **Follow-up (26 Sep 2026): approval-boundary & document-ownership closure (R01–R03).**
+> A later review of `dbfca40a` raised R01–R03 (approved-record mutation, historical
+> approval rewrites, unsafe attachment reparenting) plus the related R04/R05 paths.
+> Those are now closed and proven — including a real authenticated HTTP suite
+> (B01–B10) — in **`fleetflow/OPS1_BOUNDARY_CLOSURE_EVIDENCE.md`**. Suites after that
+> increment: model+concurrency **137/0/0**, HTTP `ff_http` **10/0/0**, structural PASS.
+> The historical F01–F09 results below are retained unchanged.
+
+
 **Date:** 23 September 2026; concurrency-regression follow-up 25 September 2026.
 **Reviewed commit:** `c3e74670` on `feat/fleetflow-ops1` (baseline `59bfb037`).
 **Correction commits:** `77ca3a24` → `9e2e96fd` (six increments, below), plus a

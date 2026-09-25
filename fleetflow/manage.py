@@ -30,7 +30,7 @@ def compose(args, project='fleetflow'):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['init', 'start', 'stop', 'logs', 'test', 'demo'])
+    parser.add_argument('command', choices=['init', 'start', 'stop', 'logs', 'test', 'test-http', 'demo'])
     args = parser.parse_args()
     if not shutil.which('docker'):
         raise SystemExit('Docker is not available. Install and start Docker with Compose v2 first.')
@@ -56,11 +56,23 @@ def main():
         compose(['run', '--rm', 'web', 'demo'])
     elif args.command == 'test':
         # Separate project/volumes; never reset the normal development database.
+        # The model suite runs with --no-http and EXCLUDES the ff_http tag (those
+        # need a live HTTP server; see the test-http command).
         project = 'fleetflow-test'
         try:
             compose(['up', '-d', '--wait', 'db'], project)
             compose(['run', '--rm', 'web', '-i', 'fleetflow_operations', '--without-demo=all', '--test-enable',
-                     '--test-tags', '/fleetflow,/fleetflow_operations', '--stop-after-init', '--no-http'], project)
+                     '--test-tags', '/fleetflow,/fleetflow_operations,-ff_http', '--stop-after-init', '--no-http'], project)
+        finally:
+            compose(['down', '-v'], project)
+    elif args.command == 'test-http':
+        # Authenticated HTTP/JSON-RPC acceptance (ff_http): the HTTP server MUST be
+        # on, so this run omits --no-http. Isolated project/volumes as usual.
+        project = 'fleetflow-http-test'
+        try:
+            compose(['up', '-d', '--wait', 'db'], project)
+            compose(['run', '--rm', 'web', '-i', 'fleetflow_operations', '--without-demo=all', '--test-enable',
+                     '--test-tags', 'ff_http', '--stop-after-init'], project)
         finally:
             compose(['down', '-v'], project)
 

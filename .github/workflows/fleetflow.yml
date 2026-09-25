@@ -17,3 +17,5 @@ jobs:
         run: python3 fleetflow/check_static.py
       - name: Odoo install and integration tests in isolated containers
         run: python3 fleetflow/manage.py test
+      - name: Authenticated HTTP boundary acceptance (ff_http) in isolated containers
+        run: python3 fleetflow/manage.py test-http
