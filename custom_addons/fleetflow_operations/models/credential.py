@@ -251,9 +251,22 @@ class FleetflowCredential(models.Model):
             })
         return True
 
-    # Interactive/active PDF constructs that have no place in static evidence.
-    _PDF_BANNED = (b"/JavaScript", b"/JS", b"/Launch", b"/OpenAction", b"/AA",
-                   b"/EmbeddedFile", b"/RichMedia", b"/AcroForm")
+    # Prohibited PDF features, enforced SEMANTICALLY over the parsed object graph
+    # (resolved indirect objects, normalised names), never by a raw byte match --
+    # so ordinary page text that merely mentions a keyword is fine, while an
+    # escaped name or an indirect reference cannot smuggle the feature past us.
+    # This preserves the prior prohibition on JavaScript/actions, embedded files,
+    # rich media and AcroForm content.
+    _PDF_BANNED_KEYS = frozenset({
+        "/JS", "/JavaScript", "/AA", "/OpenAction", "/AcroForm", "/RichMedia",
+        "/EmbeddedFiles", "/EF"})
+    _PDF_BANNED_ACTIONS = frozenset({"/JavaScript", "/Launch"})  # action /S subtype
+    _PDF_BANNED_TYPES = frozenset({  # /Type or /Subtype values
+        "/EmbeddedFile", "/Filespec", "/RichMedia", "/Screen", "/Movie"})
+    # Traversal budgets (bound our own work; the input-size cap bounds the parse).
+    _PDF_MAX_PAGES = 4000
+    _PDF_MAX_OBJECTS = 60000
+    _PDF_MAX_DEPTH = 60
     _IMAGE_MAX_PIXELS = 40_000_000  # bounded decompression (header dimensions)
 
     def _validate_evidence_file(self, att_su):
@@ -282,15 +295,116 @@ class FleetflowCredential(models.Model):
         return True
 
     def _validate_pdf_bytes(self, data):
-        if b"%%EOF" not in data[-4096:]:
-            raise UserError(_(
-                "The PDF is malformed (no end-of-file marker); a valid-looking "
-                "prefix is not a valid document."))
-        for tok in self._PDF_BANNED:
-            if tok in data:
+        """Structurally validate a PDF with the runtime parser (PyPDF2 1.26.0, the
+        version shipped in the odoo:16.0 image) and reject prohibited features
+        found in the parsed object graph.
+
+        Strictness/recovery: opened with strict=False (the parser tolerates minor
+        deviations real scanners emit), but successful construction is NOT treated
+        as success -- we additionally require a readable page tree and walk the
+        catalog. Encrypted documents cannot be inspected and are rejected (no
+        password handling is added). Malformed/unsupported structures that cannot
+        be inspected with confidence are rejected. The document is never executed
+        and stream data is never decoded (no external access, no rewrite).
+
+        Bounds: the 15 MB input cap bounds the parse; the traversal is separately
+        bounded by object/reference/depth/page budgets. See OPS1 evidence for the
+        one retained limitation (PyPDF2's own parse time is not sandboxed).
+        """
+        import io
+        import struct
+        try:
+            from PyPDF2 import PdfFileReader
+            from PyPDF2.utils import PdfReadError
+        except ImportError:  # fail closed -- never accept unvalidated bytes
+            raise UserError(_("PDF validation is unavailable on this server."))
+        # Expected malformed-document failures from the parser/our traversal, turned
+        # into a clear business rejection. Programming-defect exceptions
+        # (AttributeError/TypeError/NameError) are deliberately NOT caught here, so a
+        # bug is not disguised as an ordinary rejection.
+        parse_errors = (PdfReadError, ValueError, KeyError, IndexError,
+                        AssertionError, EOFError, RecursionError, OverflowError,
+                        struct.error)
+        try:
+            reader = PdfFileReader(io.BytesIO(data), strict=False)
+            if reader.isEncrypted:
                 raise UserError(_(
-                    "The PDF carries active or embedded content (%s), which is not "
-                    "allowed in evidence.") % tok.decode())
+                    "Encrypted or password-protected PDFs cannot be inspected and "
+                    "are not accepted as evidence."))
+            npages = reader.getNumPages()  # walks/validates the page tree
+            if npages < 1:
+                raise UserError(_("The PDF has no readable pages."))
+            if npages > self._PDF_MAX_PAGES:
+                raise UserError(_("The PDF has too many pages to validate (%d).")
+                                % npages)
+            root = reader.trailer.get("/Root")
+            if root is None:
+                raise UserError(_("The PDF has no document catalog."))
+            self._pdf_scan_prohibited(root)
+        except UserError:
+            raise
+        except parse_errors as exc:
+            raise UserError(_(
+                "The PDF is malformed or uses a structure that cannot be validated "
+                "(%s).") % type(exc).__name__)
+
+    @staticmethod
+    def _pdf_norm_name(name):
+        """Normalise a PDF name, decoding #xx hex escapes, so a spelling variation
+        such as /J#61vaScript is compared as /JavaScript."""
+        import re
+        s = str(name)
+        if "#" in s:
+            s = re.sub(r"#([0-9A-Fa-f]{2})",
+                       lambda m: chr(int(m.group(1), 16)), s)
+        return s
+
+    def _pdf_check_dict(self, dico):
+        norm = {self._pdf_norm_name(k): v for k, v in dico.items()}
+        banned = set(norm) & self._PDF_BANNED_KEYS
+        if banned:
+            raise UserError(_(
+                "The PDF carries a prohibited feature (%s), which is not allowed in "
+                "static evidence.") % ", ".join(sorted(banned)))
+        action = norm.get("/S")
+        if action is not None and self._pdf_norm_name(action) in self._PDF_BANNED_ACTIONS:
+            raise UserError(_(
+                "The PDF carries a prohibited action (%s).")
+                % self._pdf_norm_name(action))
+        for key in ("/Type", "/Subtype"):
+            value = norm.get(key)
+            if value is not None and self._pdf_norm_name(value) in self._PDF_BANNED_TYPES:
+                raise UserError(_(
+                    "The PDF carries a prohibited object type (%s).")
+                    % self._pdf_norm_name(value))
+
+    def _pdf_scan_prohibited(self, root):
+        """Bounded walk of the reachable object graph from the catalog, resolving
+        indirect objects (and object streams, transparently via the parser). Does
+        NOT stop at the top-level dictionary or the first page, and never decodes
+        stream data."""
+        from PyPDF2.generic import IndirectObject, DictionaryObject, ArrayObject
+        seen, stack, visited = set(), [(root, 0)], 0
+        while stack:
+            obj, depth = stack.pop()
+            if depth > self._PDF_MAX_DEPTH:
+                raise UserError(_("The PDF nesting is too deep to validate."))
+            if isinstance(obj, IndirectObject):
+                ref = (obj.idnum, obj.generation)
+                if ref in seen:
+                    continue
+                seen.add(ref)
+                obj = obj.getObject()  # resolves classic/xref-stream/object-stream
+                visited += 1
+                if visited > self._PDF_MAX_OBJECTS:
+                    raise UserError(_("The PDF has too many objects to validate."))
+            if isinstance(obj, DictionaryObject):
+                self._pdf_check_dict(obj)
+                for value in obj.values():
+                    stack.append((value, depth + 1))
+            elif isinstance(obj, ArrayObject):
+                for value in obj:
+                    stack.append((value, depth + 1))
 
     def _validate_image_bytes(self, data):
         try:
@@ -315,30 +429,60 @@ class FleetflowCredential(models.Model):
         for rec in self:
             if rec.state not in ("draft", "pending"):
                 raise UserError(_("Only draft/pending evidence can be verified (%s).") % rec.name)
+            # A linked renewal establishes the predecessor's effective cutover from
+            # its OWN effective start; approving it without a precise 'Valid from'
+            # would leave the cutover ambiguous. Refuse rather than guess today's
+            # date (F): record a precise effective date or return it for review.
+            if rec.supersedes_id and (not rec.date_start or rec.date_precision != "day"):
+                raise UserError(_(
+                    "Evidence %s replaces an earlier document, so it needs a precise "
+                    "effective (Valid from) date before it can be approved. Record "
+                    "one, or return it for review.") % rec.name)
         now = fields.Datetime.now()
         # Re-validate the source file against its CURRENT bytes immediately before
-        # verifying, under a row lock. This closes two gaps: a file edited after
-        # linking cannot slip past the approval-time policy, and a concurrent
-        # mutation cannot leave verified evidence pointing at different bytes (once
-        # verified, ever_verified freezes the source so no later write can diverge).
+        # verifying, under a row lock, THEN bump the source-lock counter so the
+        # approval is a committed write on that row. This closes two gaps: a file
+        # edited after linking cannot slip past the approval-time policy; and a
+        # writer that observed the still-unverified credential on an older snapshot
+        # cannot commit a competing attachment mutation after approval -- its write
+        # now conflicts on the same row (first-updater-wins under REPEATABLE READ),
+        # so verified evidence can never end up pointing at unvalidated bytes.
+        att_ids = sorted(self.mapped("attachment_id").ids)
+        for att_id in att_ids:
+            self.env.cr.execute(
+                "SELECT id FROM ir_attachment WHERE id = %s FOR UPDATE", (att_id,))
         for rec in self:
             if rec.attachment_id:
-                self.env.cr.execute(
-                    "SELECT id FROM ir_attachment WHERE id = %s FOR UPDATE",
-                    (rec.attachment_id.id,))
                 rec.attachment_id.invalidate_recordset(["raw", "datas"])
                 rec._validate_evidence_file(rec.attachment_id.sudo())
         self._apply({
             "state": "verified", "verified_by": self.env.uid, "verified_on": now,
             "ever_verified": True,
         })
+        constants.bump_attachment_source_locks(self.env, att_ids)
         # A verified renewal takes over from the document it supersedes -- but only
-        # the RELATIONSHIP is recorded here; coverage is decided per requested
-        # interval by effective dates (see _validity). A future-effective renewal
-        # therefore does not remove the predecessor's still-valid current coverage.
+        # the RELATIONSHIP + attribution are recorded here; coverage is then decided
+        # per requested interval by effective dates (see _effective_interval). The
+        # predecessor row is locked FOR UPDATE first so two reviewers approving
+        # competing successors concurrently cannot both win: the second sees the
+        # predecessor already replaced (or fails to serialise and retries), and one
+        # unambiguous chain results. A predecessor that is no longer verified (e.g.
+        # revoked in the meantime) is never resurrected.
         for rec in self:
             predecessor = rec.supersedes_id
-            if predecessor and predecessor.state == "verified":
+            if not predecessor:
+                continue
+            self.env.cr.execute(
+                "SELECT id FROM fleetflow_credential WHERE id = %s FOR UPDATE",
+                (predecessor.id,))
+            predecessor.invalidate_recordset(["state", "superseded_by_id"])
+            if (predecessor.state == "superseded"
+                    and predecessor.superseded_by_id != rec):
+                raise UserError(_(
+                    "Evidence %s has already been replaced by another approved "
+                    "renewal. Resolve the conflicting replacement chain before "
+                    "approving this one.") % predecessor.name)
+            if predecessor.state == "verified":
                 predecessor._apply({"state": "superseded", "superseded_by_id": rec.id,
                                     "replaced_on": now})
         self._bump_subject_locks()
@@ -414,44 +558,143 @@ class FleetflowCredential(models.Model):
         from datetime import datetime, time
         return tz.localize(datetime.combine(day, time.min))
 
-    def _validity(self, start_dt, end_dt, tz):
-        """Classify this evidence over [start, end) as one of:
+    def _cutover(self, tz):
+        """The reviewed effective cutover of a superseded record: the moment its
+        successor takes over, i.e. the successor's own effective start (Valid from).
 
-        - 'not_verified': not in the verified state.
-        - 'unknown'     : validity cannot be trusted -- a blank 'valid until' that
-                          is not a reviewed non-expiring, or an imprecise date
-                          (year/month/unknown precision). Blank != unlimited.
-        - 'expired'     : verified with a real bound the interval falls outside.
-        - 'covers'      : verified and valid for the whole interval.
-
-        Date-only validity uses a local-day boundary in the operator's timezone
-        ('valid until D' = through the end of day D), never an accidental UTC
-        midnight.
+        Derived from the LINKED successor (an immutable, verified record whose
+        subject/kind continuity was enforced at supersession), so it cannot move
+        because the successor is later expired, revoked, rejected or archived, and
+        it is never confused with the approval timestamp. Returns None when the
+        successor gives no precise effective date -- ambiguity is surfaced for
+        review, never guessed (no silent 'today').
         """
         self.ensure_one()
-        # Coverage is provided by a record that was legitimately approved and not
-        # revoked: 'verified' (current) or 'superseded' (replaced, but its own
-        # effective interval remains historically valid). A rejected/revoked or
-        # never-verified record provides NO coverage -- revoked coverage is never
-        # resurrected. The effective interval below then bounds it, so a
-        # future-effective renewal only covers its own window.
+        succ = self.superseded_by_id
+        if not succ or not succ.date_start or succ.date_precision != "day":
+            return None
+        return self._local_midnight(succ.date_start, tz)
+
+    def _effective_interval(self, tz):
+        """Return (eff_start, eff_end, reliable): the half-open [eff_start, eff_end)
+        over which THIS record is trusted operating evidence, as tz-aware datetimes
+        (None = unbounded on that side).
+
+        A verified record is bounded by its own precise validity (or unbounded when
+        a reviewer marked it non-expiring). A superseded record's authority ENDS at
+        its cutover -- it never falls back to its own printed expiry for a period
+        assigned to its successor. reliable=False means the record supplies no
+        trustworthy coverage (not verified/superseded, an imprecise/blank date, or a
+        superseded record whose cutover is ambiguous); such a record is surfaced for
+        review rather than silently granting eligibility.
+        """
+        self.ensure_one()
+        if self.state not in ("verified", "superseded"):
+            return (None, None, False)
+        if self.date_precision in ("year", "month", "unknown"):
+            return (None, None, False)
+        from datetime import timedelta
+        eff_start = self._local_midnight(self.date_start, tz) if self.date_start else None
+        if self.date_end:
+            eff_end = self._local_midnight(self.date_end + timedelta(days=1), tz)
+        elif self.open_ended:
+            eff_end = None  # reviewed non-expiring
+        else:
+            return (None, None, False)  # blank 'valid until' != unlimited
+        if self.state == "superseded":
+            cutover = self._cutover(tz)
+            if cutover is None:
+                return (None, None, False)  # ambiguous replacement -> needs review
+            eff_end = cutover if eff_end is None else min(eff_end, cutover)
+            if eff_start is not None and eff_end <= eff_start:
+                return (None, None, False)
+        return (eff_start, eff_end, True)
+
+    def _validity(self, start_dt, end_dt, tz):
+        """Classify this SINGLE record over [start, end) as one of:
+
+        - 'not_verified': not in the verified/superseded lifecycle.
+        - 'unknown'     : verified/superseded but its effective interval cannot be
+                          trusted (blank non-reviewed expiry, imprecise date, or a
+                          superseded record with an ambiguous cutover).
+        - 'expired'     : effective, but the interval falls outside it (expired, not
+                          yet effective, or past the record's cutover).
+        - 'covers'      : effective for the whole interval on its own.
+
+        Date-only validity uses a local-day boundary in the operator's timezone
+        ('valid until D' = through the end of day D), with half-open boundaries.
+        """
+        self.ensure_one()
         if self.state not in ("verified", "superseded"):
             return "not_verified"
-        # An imprecise date cannot be trusted to a day-accurate boundary.
         if self.date_precision in ("year", "month", "unknown"):
             return "unknown"
-        from datetime import timedelta
-        if self.date_start and start_dt < self._local_midnight(self.date_start, tz):
+        eff_start, eff_end, reliable = self._effective_interval(tz)
+        if not reliable:
+            return "unknown"
+        if eff_start is not None and start_dt < eff_start:
             return "expired"  # not yet effective for the whole interval
-        if self.date_end:
-            if end_dt > self._local_midnight(self.date_end + timedelta(days=1), tz):
-                return "expired"
-            return "covers"
-        # No 'valid until': only a reviewed non-expiring counts; a blank does not.
-        return "covers" if self.open_ended else "unknown"
+        if eff_end is not None and end_dt > eff_end:
+            return "expired"  # expired, or authority ended at the cutover
+        return "covers"
+
+    @api.model
+    def _resolve_coverage(self, creds, start_dt, end_dt, tz):
+        """Return an ordered recordset [oldest..newest] whose EFFECTIVE intervals
+        together cover the whole [start, end), or an empty recordset if they do not.
+
+        Coverage is satisfied by a single record when possible, otherwise ONLY by a
+        continuous reviewed-renewal chain (records linked by supersession). This
+        deliberately never bridges a genuine validity gap and never combines
+        unrelated records as if they were a renewal chain. Selection is independent
+        of record/search order.
+        """
+        info = {}
+        for cred in creds:
+            eff_start, eff_end, reliable = cred._effective_interval(tz)
+            if reliable:
+                info[cred.id] = (eff_start, eff_end)
+
+        def active_at(cred, pos):
+            eff_start, eff_end = info[cred.id]
+            return ((eff_start is None or eff_start <= pos)
+                    and (eff_end is None or pos < eff_end))
+
+        def reaches(cred, pos):
+            eff_end = info[cred.id][1]
+            return eff_end is None or eff_end >= pos
+
+        contributors = creds.filtered(lambda c: c.id in info)
+        # 1) A single record covering the whole interval (prefer the current head).
+        for cred in contributors.sorted(key=lambda c: (c.state != "verified", c.id)):
+            if active_at(cred, start_dt) and reaches(cred, end_dt):
+                return cred
+        # 2) A continuous reviewed-renewal chain: from a record active at `start`,
+        #    follow superseded_by_id, requiring each successor to pick up exactly
+        #    where the predecessor's authority ends (no gap, no unrelated record).
+        Empty = self.env["fleetflow.credential"]
+        starters = contributors.filtered(lambda c: active_at(c, start_dt))
+        for starter in starters.sorted(key=lambda c: (c.id,)):
+            selected = Empty
+            current = starter
+            pos = start_dt
+            guard = 0
+            while current is not None and guard < 64:
+                guard += 1
+                selected |= current
+                eff_end = info[current.id][1]
+                pos = end_dt if eff_end is None else eff_end
+                if pos >= end_dt:
+                    return selected
+                succ = current.superseded_by_id
+                if (succ and succ.id in info and active_at(succ, pos)):
+                    current = succ
+                else:
+                    current = None  # gap or broken chain: this starter fails
+        return Empty
 
     def _covers_interval(self, start_dt, end_dt, tz):
-        """True if verified and valid for the WHOLE [start, end)."""
+        """True if this single record is effective for the WHOLE [start, end)."""
         self.ensure_one()
         return self._validity(start_dt, end_dt, tz) == "covers"
 

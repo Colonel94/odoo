@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from odoo import models, _
+from odoo import fields, models, _
 from odoo.exceptions import AccessError
 
 
@@ -29,6 +29,16 @@ class IrAttachment(models.Model):
     mail/assets/attachments are untouched.
     """
     _inherit = "ir.attachment"
+
+    # Version counter bumped inside the verification transaction (see
+    # constants.bump_attachment_source_locks). It exists so that approving a
+    # credential is a committed write on its source row: a concurrent writer that
+    # observed the credential while still unverified and then mutates this file
+    # conflicts on this row (first-updater-wins under REPEATABLE READ) instead of
+    # slipping a change past approval. Only added on credential evidence files;
+    # unrelated attachments simply carry a null counter.
+    ff_source_lock = fields.Integer(
+        string="Evidence source lock counter", default=0, copy=False)
 
     def check(self, mode, values=None):
         if not self.env.su and self:

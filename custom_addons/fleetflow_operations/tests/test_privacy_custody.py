@@ -34,9 +34,8 @@ class TestPrivacyCustody(OperationsCase):
 
     # -- F08: attachment binding & privacy -------------------------------
     def test_linked_attachment_is_bound_and_restricted(self):
-        att = self.env["ir.attachment"].create({
-            "name": "lic.pdf",
-            "raw": b"%PDF-1.4\n1 0 obj<< /Type /Catalog >>endobj\ntrailer<< /Root 1 0 R >>\n%%EOF\n"})
+        from .pdf_fixtures import VALID_PDF
+        att = self.env["ir.attachment"].create({"name": "lic.pdf", "raw": VALID_PDF})
         cred = self.env["fleetflow.credential"].create({
             "name": "L", "doc_kind": "driver_licence", "company_id": self.company.id,
             "driver_id": self.driver.id, "attachment_id": att.id})

@@ -18,8 +18,7 @@ from datetime import date, datetime, time, timedelta
 from odoo.tests import tagged
 from odoo.tests.common import HttpCase
 
-# A minimal but structurally-valid PDF (has %%EOF, no active/embedded content).
-PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n"
+from .pdf_fixtures import VALID_PDF as PDF, BAD_PDFS
 PW = "boundary-http-pw"
 
 
@@ -446,3 +445,61 @@ class TestHttpBoundary(HttpCase):
             enr.invalidate_recordset()
             self.assertEqual(enr.state, "pending")
             self.assertFalse(enr.verified_as_of)
+
+    # ------------------------------------------------------------------
+    # B16 -- structural PDF validation over RPC: a genuinely valid PDF binds and
+    #        verifies; a PDF carrying JavaScript (via indirection) or one with no
+    #        valid structure is refused with a BUSINESS error, unchanged (task 2).
+    # ------------------------------------------------------------------
+    def test_B16_pdf_structural_validation_over_rpc(self):
+        self.authenticate("http.comp", PW)
+        # A valid one-page PDF binds and verifies.
+        ok_att = self._assert_ok(self._rpc("ir.attachment", "create", [{
+            "name": "ok.pdf", "datas": base64.b64encode(PDF).decode()}]))
+        cred_id = self._assert_ok(self._rpc("fleetflow.credential", "create", [{
+            "name": "b16-ok", "doc_kind": "professional_permit",
+            "company_id": self.company.id, "driver_id": self.driver.id,
+            "attachment_id": ok_att}]))
+        self._assert_ok(self._rpc("fleetflow.credential", "action_verify", [[cred_id]]))
+        # A PDF whose JavaScript is reachable only by resolving an indirect object,
+        # and a plausible-header-but-structureless PDF, are both rejected at bind.
+        for key in ("js_indirect", "fake_header", "encrypted"):
+            bad_att = self._assert_ok(self._rpc("ir.attachment", "create", [{
+                "name": "%s.pdf" % key, "datas": base64.b64encode(BAD_PDFS[key]).decode()}]))
+            body = self._rpc("fleetflow.credential", "create", [{
+                "name": "b16-%s" % key, "doc_kind": "professional_permit",
+                "company_id": self.company.id, "driver_id": self.driver.id,
+                "attachment_id": bad_att}])
+            self._assert_denied(body)
+            # The rejected file is left completely unchanged (still unbound).
+            att = self.env["ir.attachment"].browse(bad_att)
+            att.invalidate_recordset()
+            self.assertFalse(att.res_model, key)
+
+    # ------------------------------------------------------------------
+    # B17 -- effective-dated replacement over RPC: after a bounded successor's
+    #        window ends, coverage does NOT fall back to the predecessor even
+    #        though the predecessor's own expiry is later (task 1).
+    # ------------------------------------------------------------------
+    def _insurance_code(self, days_ahead):
+        for r in self._readiness(days_ahead)["reasons"]:
+            if r["check"] == "insurance":
+                return r["code"]
+        return None
+
+    def test_B17_no_fallback_after_cutover_over_rpc(self):
+        self.authenticate("http.comp", PW)
+        # Supersede the (long-dated) insurance with a SHORT-window successor.
+        cutover = date.today() + timedelta(days=2)
+        succ_end = date.today() + timedelta(days=5)
+        renewal_id = self._assert_ok(self._rpc(
+            "fleetflow.credential", "action_supersede", [[self.ins.id], {
+                "name": "ins-http-renewal", "date_start": cutover.isoformat(),
+                "date_end": succ_end.isoformat()}]))
+        self._assert_ok(self._rpc("fleetflow.credential", "action_verify", [[renewal_id]]))
+        # Before the cutover the predecessor still covers; within the successor
+        # window the successor covers; AFTER the successor expires there is no
+        # fall-back to the predecessor (whose own expiry is a year out).
+        self.assertNotEqual(self._insurance_code(1), "doc_expired")   # predecessor
+        self.assertNotEqual(self._insurance_code(3), "doc_expired")   # successor
+        self.assertEqual(self._insurance_code(20), "doc_expired")     # no fallback

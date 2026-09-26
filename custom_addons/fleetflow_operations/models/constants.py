@@ -115,3 +115,22 @@ def bump_resource_locks(env, vehicle_ids=(), driver_ids=()):
         env.cr.execute(
             "UPDATE fleetflow_driver SET ff_alloc_lock = COALESCE(ff_alloc_lock, 0) + 1 "
             "WHERE id IN %s", (driver_ids,))
+
+
+def bump_attachment_source_locks(env, attachment_ids=()):
+    """Serialise evidence approval against competing source-file mutations.
+
+    Verifying a credential bumps this counter on its source attachment row inside
+    the same transaction. Any other transaction that observed the still-unverified
+    credential on an older snapshot and then tries to overwrite, delete, re-bind or
+    publish that same attachment updates/deletes the same row, so it conflicts
+    (Postgres first-updater-wins under REPEATABLE READ) and aborts instead of
+    committing a mutation onto just-approved evidence. Ids are locked/updated in
+    sorted order to keep a consistent lock order with the FOR UPDATE taken earlier.
+    """
+    attachment_ids = tuple(sorted({i for i in attachment_ids if i}))
+    if attachment_ids:
+        env.cr.execute(
+            "UPDATE ir_attachment SET ff_source_lock = COALESCE(ff_source_lock, 0) + 1 "
+            "WHERE id IN %s", (attachment_ids,))
+        env["ir.attachment"].browse(attachment_ids).invalidate_recordset(["ff_source_lock"])

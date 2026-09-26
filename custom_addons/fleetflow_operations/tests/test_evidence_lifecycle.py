@@ -20,9 +20,8 @@ from odoo.exceptions import AccessError, UserError
 from odoo.tests import tagged
 
 from .common import OperationsCase
+from .pdf_fixtures import VALID_PDF
 from ..models import constants
-
-VALID_PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n"
 
 
 @tagged("post_install", "-at_install")

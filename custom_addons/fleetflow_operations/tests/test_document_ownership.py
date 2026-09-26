@@ -14,9 +14,9 @@ from odoo.exceptions import AccessError, UserError
 from odoo.tests import tagged
 
 from .common import OperationsCase
+from .pdf_fixtures import VALID_PDF as PDF  # a genuinely-valid one-page PDF
 
-# A minimal but structurally-valid PDF (has %%EOF, no active/embedded content).
-PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n"
+
 def _png_1x1():
     import io
     from PIL import Image

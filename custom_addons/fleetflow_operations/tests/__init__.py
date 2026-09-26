@@ -12,4 +12,7 @@ from . import test_privacy_custody
 from . import test_boundary_authority
 from . import test_document_ownership
 from . import test_evidence_lifecycle
+from . import test_pdf_validation
+from . import test_effective_cutover
+from . import test_verification_race
 from . import test_http_boundary

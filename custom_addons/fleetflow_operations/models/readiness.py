@@ -215,21 +215,30 @@ class FleetflowReadiness(models.AbstractModel):
         return True
 
     def _check_document(self, subject_field, subject, doc_kind, start, end, tz):
-        creds = self.env["fleetflow.credential"].search([
+        Cred = self.env["fleetflow.credential"]
+        creds = Cred.search([
             (subject_field, "=", subject.id), ("doc_kind", "=", doc_kind),
         ])
-        states = {c.id: c._validity(start, end, tz) for c in creds}
-        covering = creds.filtered(lambda c: states[c.id] == "covers")
-        if covering:
-            # Warn if the covering document expires shortly after the interval.
-            ends = [d for d in covering.mapped("date_end") if d]
-            soonest = min(ends) if ends else False
-            if soonest and self._doc_end(soonest, tz) <= end + timedelta(days=WARN_WINDOW_DAYS):
-                return self._reason(doc_kind, constants.WARNING, "expiring_soon",
-                                    _("%s is valid but expires within %d days after the interval.")
-                                    % (doc_kind, WARN_WINDOW_DAYS), ref=covering[:1])
+        # Whole-interval coverage by a single record OR a continuous reviewed
+        # renewal chain (predecessor up to its cutover, successor from there on).
+        # A legitimate chain spanning a cutover is covered; a real gap is not, and
+        # unrelated records are never bridged.
+        chain = Cred._resolve_coverage(creds, start, end, tz)
+        if chain:
+            # The record actually used at the END of the interval drives any
+            # "expiring soon" warning -- an obsolete predecessor's expiry must not
+            # warn for a period its successor covers. A record still bounded by a
+            # later successor (superseded) is not "expiring"; only a current head is.
+            used = chain[-1]
+            if used.state == "verified" and used.date_end:
+                boundary = self._doc_end(used.date_end, tz)
+                if boundary <= end + timedelta(days=WARN_WINDOW_DAYS):
+                    return self._reason(doc_kind, constants.WARNING, "expiring_soon",
+                                        _("%s is valid but expires within %d days after the interval.")
+                                        % (doc_kind, WARN_WINDOW_DAYS), ref=used)
             return self._reason(doc_kind, constants.READY, "doc_ok",
-                                _("%s valid for the interval.") % doc_kind, ref=covering[:1])
+                                _("%s valid for the interval.") % doc_kind, ref=used)
+        states = {c.id: c._validity(start, end, tz) for c in creds}
         expired = creds.filtered(lambda c: states[c.id] == "expired")
         if expired:
             # Verified but not effective for the whole interval => expired/not yet valid.
