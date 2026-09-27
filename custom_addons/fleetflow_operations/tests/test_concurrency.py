@@ -4,14 +4,18 @@ to reserve the same vehicle for an overlapping interval. Exactly one wins; the
 other fails cleanly with no partial state. This uses real committed cursors, not
 sequential calls in one transaction (an in-memory mock would not prove locking).
 """
+import hashlib
 import threading
 from datetime import datetime, time, timedelta, date
 
 from psycopg2 import errors as pg_errors
 
 from odoo import api, registry, SUPERUSER_ID
+from odoo.exceptions import UserError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase
+
+from .pdf_fixtures import ONE_PAGE_PDF
 
 
 def _classify(exc):
@@ -534,3 +538,174 @@ class TestConcurrency(TransactionCase):
                 env["res.users"].browse(ids["dispatcher"]).unlink()
                 env["fleetflow.operating.profile"].browse(ids["profile"]).unlink()
                 cr.commit()
+
+    # ==================================================================
+    # R1 race: two connections approve competing successors of the SAME
+    # predecessor that was already REVOKED before either approval. Exactly
+    # one wins the successor slot; the loser aborts (serialization) or is
+    # refused (business error) and, on retry in a fresh transaction, is
+    # cleanly refused by the recorded winner. The predecessor stays revoked
+    # with its source-file history intact.
+    # ==================================================================
+    def _seed_revoked_predecessor_two_renewals(self, reg, suffix):
+        """Commit: a verified predecessor credential (with a bound source file) that
+        is then REVOKED, plus two staged (draft) linked renewals of it. Returns the
+        committed ids and the predecessor source-byte hash."""
+        with reg.cursor() as cr:
+            env = api.Environment(cr, SUPERUSER_ID, {})
+            company = env.company
+            compliance = env["res.users"].with_context(no_reset_password=True).create({
+                "name": "r1 %s comp" % suffix, "login": "ff.r1.%s.comp" % suffix,
+                "email": "ff.r1.%s.comp@example.com" % suffix,
+                "company_id": company.id, "company_ids": [(6, 0, company.ids)],
+                "groups_id": [(6, 0, [env.ref("fleetflow_operations.group_ops_compliance").id])]})
+            brand = env["fleet.vehicle.model.brand"].create({"name": "r1 %s brand" % suffix})
+            model = env["fleet.vehicle.model"].create({"name": "r1 %s model" % suffix, "brand_id": brand.id})
+            vehicle = env["fleet.vehicle"].create({
+                "model_id": model.id, "license_plate": "R1-%s" % suffix, "company_id": company.id,
+                "ff_operator_company_id": company.id, "ff_operational_state": "reviewed"})
+            att = env["ir.attachment"].create({"name": "r1-%s.pdf" % suffix, "raw": ONE_PAGE_PDF})
+            pred = env["fleetflow.credential"].create({
+                "name": "r1-pred-%s" % suffix, "doc_kind": "vehicle_registration",
+                "company_id": company.id, "vehicle_id": vehicle.id, "attachment_id": att.id,
+                "date_start": date.today() - timedelta(days=10),
+                "date_end": date.today() + timedelta(days=200)})
+            pred.action_verify()
+            nm = date.today() + timedelta(days=31)
+            r1 = env["fleetflow.credential"].browse(pred.action_supersede({
+                "name": "r1-a-%s" % suffix, "date_start": nm, "date_end": nm + timedelta(days=365)}))
+            r2 = env["fleetflow.credential"].browse(pred.action_supersede({
+                "name": "r1-b-%s" % suffix, "date_start": nm, "date_end": nm + timedelta(days=365)}))
+            # Revoke the predecessor BEFORE either renewal is approved.
+            pred.action_reject(reason="predecessor revoked before renewal")
+            ids = {"pred": pred.id, "r1": r1.id, "r2": r2.id, "vehicle": vehicle.id,
+                   "att": att.id, "compliance": compliance.id}
+            pred_hash = hashlib.sha256(att.raw).hexdigest()
+            cr.commit()
+        return ids, pred_hash
+
+    def _cleanup_r1(self, reg, ids):
+        with reg.cursor() as cr:
+            env = api.Environment(cr, SUPERUSER_ID, {})
+            env["fleetflow.credential"].search([("vehicle_id", "=", ids["vehicle"])]).sudo().unlink()
+            att = env["ir.attachment"].browse(ids["att"])
+            if att.exists():
+                att.sudo().unlink()
+            env["fleet.vehicle"].browse(ids["vehicle"]).unlink()
+            env["res.users"].browse(ids["compliance"]).unlink()
+            cr.commit()
+
+    def _assert_one_surviving_successor(self, reg, ids, pred_hash):
+        """From a FRESH transaction: exactly one accepted successor, the predecessor
+        stays revoked with its winner link and its source bytes intact."""
+        with reg.cursor() as cr:
+            env = api.Environment(cr, SUPERUSER_ID, {})
+            pred = env["fleetflow.credential"].browse(ids["pred"])
+            accepted = env["fleetflow.credential"].search([
+                ("supersedes_id", "=", ids["pred"]), ("state", "=", "verified")])
+            self.assertEqual(len(accepted), 1, "exactly one accepted successor must survive")
+            self.assertEqual(pred.superseded_by_id, accepted)
+            self.assertEqual(pred.state, "rejected", "predecessor revocation must survive")
+            self.assertTrue(pred.revoked_by)
+            att = env["ir.attachment"].browse(ids["att"])
+            self.assertTrue(att.exists(), "predecessor source file history must survive")
+            self.assertEqual(hashlib.sha256(att.raw).hexdigest(), pred_hash,
+                             "predecessor source bytes must be unchanged")
+            return accepted.id
+
+    def test_revoked_predecessor_two_connection_race_one_winner(self):
+        """Barrier race: both connections approve a competing successor of the same
+        revoked predecessor at once. Exactly one wins; the loser fails with a
+        serialization failure or a business denial (never a second accepted
+        successor)."""
+        reg = registry(self.env.cr.dbname)
+        ids, pred_hash = self._seed_revoked_predecessor_two_renewals(reg, "race")
+        try:
+            def approve(cred_id):
+                def work(env):
+                    env["fleetflow.credential"].browse(cred_id).action_verify()
+                return work
+            results = self._race(
+                reg, (ids["compliance"], approve(ids["r1"])),
+                (ids["compliance"], approve(ids["r2"])))
+            self.assertEqual(len(results), 2, "both threads must finish: %s" % results)
+            self.assertEqual(list(results.values()).count("ok"), 1,
+                             "exactly one competing approval may win: %s" % results)
+            loser = [v for v in results.values() if v != "ok"][0]
+            self.assertIn(loser, ("serialization", "UserError"),
+                          "the losing approval must abort or be refused, got: %s" % results)
+            self._assert_one_surviving_successor(reg, ids, pred_hash)
+        finally:
+            self._cleanup_r1(reg, ids)
+
+    def test_revoked_predecessor_serialization_then_clean_retry(self):
+        """Deterministic ordering that forces the serialization path: the loser pins
+        its snapshot on the still-unreplaced predecessor, the winner approves and
+        commits, the loser then aborts with a serialization failure, and on retry in
+        a FRESH transaction is cleanly refused by the recorded winner (a business
+        UserError, not another serialization)."""
+        reg = registry(self.env.cr.dbname)
+        ids, pred_hash = self._seed_revoked_predecessor_two_renewals(reg, "retry")
+        results = {}
+        loser_observed = threading.Event()
+        winner_done = threading.Event()
+        try:
+            def loser():
+                with reg.cursor() as cr:
+                    env = api.Environment(cr, ids["compliance"], {})
+                    # Pin the REPEATABLE READ snapshot on the still-unreplaced predecessor.
+                    cr.execute("SELECT superseded_by_id FROM fleetflow_credential WHERE id = %s",
+                               (ids["pred"],))
+                    results["observed_superseded_by"] = cr.fetchone()[0]
+                    loser_observed.set()
+                    if not winner_done.wait(timeout=20):
+                        results["loser"] = "winner-timeout"
+                        return
+                    try:
+                        env["fleetflow.credential"].browse(ids["r2"]).action_verify()
+                        cr.commit()
+                        results["loser"] = "ok"
+                    except Exception as exc:  # pragma: no cover - exercised at runtime
+                        cr.rollback()
+                        results["loser"] = _classify(exc)
+
+            def winner():
+                with reg.cursor() as cr:
+                    env = api.Environment(cr, ids["compliance"], {})
+                    if not loser_observed.wait(timeout=20):
+                        results["winner"] = "loser-timeout"
+                        winner_done.set()
+                        return
+                    try:
+                        env["fleetflow.credential"].browse(ids["r1"]).action_verify()
+                        cr.commit()
+                        results["winner"] = "ok"
+                    except Exception as exc:  # pragma: no cover - exercised at runtime
+                        cr.rollback()
+                        results["winner"] = _classify(exc)
+                    winner_done.set()
+
+            threads = [threading.Thread(target=loser), threading.Thread(target=winner)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=40)
+
+            self.assertFalse(results.get("observed_superseded_by"),
+                             "loser must observe the predecessor still unreplaced")
+            self.assertEqual(results.get("winner"), "ok", "the winner must commit: %s" % results)
+            self.assertEqual(results.get("loser"), "serialization",
+                             "the loser must abort with a serialization failure: %s" % results)
+            winner_id = self._assert_one_surviving_successor(reg, ids, pred_hash)
+            self.assertEqual(winner_id, ids["r1"])
+            # Retry on a FRESH transaction: the snapshot now sees the recorded winner,
+            # so the second approval is cleanly refused by a business error.
+            with reg.cursor() as cr:
+                env = api.Environment(cr, ids["compliance"], {})
+                with self.assertRaises(UserError):
+                    env["fleetflow.credential"].browse(ids["r2"]).action_verify()
+                    cr.flush()
+                cr.rollback()
+            self._assert_one_surviving_successor(reg, ids, pred_hash)
+        finally:
+            self._cleanup_r1(reg, ids)

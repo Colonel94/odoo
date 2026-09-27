@@ -548,3 +548,86 @@ class TestHttpBoundary(HttpCase):
         cred.invalidate_recordset()
         self.assertEqual(cred.state, "superseded")
         self.assertEqual(cred.superseded_by_id.id, renewal_id)
+
+    def test_B19_revoked_predecessor_competing_renewals_over_rpc(self):
+        """R1 over the authenticated API: a predecessor revoked before either renewal
+        is approved. The first (legitimate) approval succeeds; the competing sibling
+        approval is refused by a business denial; exactly one accepted successor
+        results and the predecessor stays rejected with its winner link."""
+        self.authenticate("http.comp", PW)
+        veh = self.env["fleet.vehicle"].sudo().create({
+            "model_id": self.vehicle.model_id.id, "license_plate": "HTTP-R1",
+            "company_id": self.company.id, "ff_operator_company_id": self.company.id})
+        pred_id = self._assert_ok(self._rpc("fleetflow.credential", "create", [{
+            "name": "b19-pred", "doc_kind": "vehicle_registration",
+            "company_id": self.company.id, "vehicle_id": veh.id,
+            "date_start": (date.today() - timedelta(days=10)).isoformat(),
+            "date_end": (date.today() + timedelta(days=200)).isoformat()}]))
+        self._assert_ok(self._rpc("fleetflow.credential", "action_verify", [[pred_id]]))
+        nm = date.today() + timedelta(days=31)
+        renewal = {"date_start": nm.isoformat(), "date_end": (nm + timedelta(days=365)).isoformat()}
+        r1_id = self._assert_ok(self._rpc("fleetflow.credential", "action_supersede",
+                                          [[pred_id], dict(renewal, name="b19-r1")]))
+        r2_id = self._assert_ok(self._rpc("fleetflow.credential", "action_supersede",
+                                          [[pred_id], dict(renewal, name="b19-r2")]))
+        # Revoke the predecessor BEFORE either renewal is approved.
+        self._assert_ok(self._rpc("fleetflow.credential", "action_reject", [[pred_id]],
+                                  {"reason": "revoked before renewal"}))
+        # The legitimate first approval succeeds even though the predecessor is dead.
+        self._assert_ok(self._rpc("fleetflow.credential", "action_verify", [[r1_id]]))
+        # The competing sibling approval is refused by a BUSINESS denial (not a 500).
+        self._assert_denied(self._rpc("fleetflow.credential", "action_verify", [[r2_id]]))
+        pred = self.env["fleetflow.credential"].browse(pred_id)
+        r1 = self.env["fleetflow.credential"].browse(r1_id)
+        r2 = self.env["fleetflow.credential"].browse(r2_id)
+        (pred + r1 + r2).invalidate_recordset()
+        self.assertEqual(pred.state, "rejected")            # not resurrected
+        self.assertEqual(pred.superseded_by_id.id, r1_id)   # single winner recorded
+        self.assertEqual(r1.state, "verified")
+        self.assertNotEqual(r2.state, "verified")           # sibling not approved
+
+    def test_B20_inconsistent_successor_needs_review_over_rpc(self):
+        """R2 over the authenticated API: an inconsistent legacy chain (successor
+        redirected to a different vehicle) must not supply trusted coverage. The
+        readiness document check for the successor's own subject reports
+        needs-review/unknown validity, not a green result."""
+        env = self.env
+        veh_x, veh_y = env["fleet.vehicle"].sudo().create([
+            {"model_id": self.vehicle.model_id.id, "license_plate": "HTTP-R2X",
+             "company_id": self.company.id, "ff_operator_company_id": self.company.id,
+             "ff_operational_state": "reviewed"},
+            {"model_id": self.vehicle.model_id.id, "license_plate": "HTTP-R2Y",
+             "company_id": self.company.id, "ff_operator_company_id": self.company.id,
+             "ff_operational_state": "reviewed"}])
+        Cred = env["fleetflow.credential"].sudo()
+        pred = Cred.create({
+            "name": "b20-pred", "doc_kind": "vehicle_registration", "company_id": self.company.id,
+            "vehicle_id": veh_x.id, "date_start": date.today() - timedelta(days=10),
+            "date_end": date.today() + timedelta(days=200)})
+        pred.action_verify()
+        nm = date.today() + timedelta(days=31)
+        renewal = Cred.browse(pred.action_supersede({
+            "name": "b20-renewal", "date_start": nm, "date_end": nm + timedelta(days=365)}))
+        renewal.action_verify()
+        renewal._apply({"vehicle_id": veh_y.id})   # legacy redirect, ORM-level only
+        renewal.invalidate_recordset()
+        # A minimal published rental profile requiring only the vehicle registration.
+        profile = env["fleetflow.operating.profile"].sudo().create({
+            "name": "b20 rental", "company_id": self.company.id, "operating_mode": "rental",
+            "require_operating_authorization": False, "require_vehicle_registration": True,
+            "require_insurance": False, "require_driver_licence": False,
+            "require_professional_permit": False, "require_channel_approval": False,
+            "enforce_end_of_use": False, "require_category_evidence": False})
+        profile.action_publish()
+
+        self.authenticate("http.comp", PW)
+        inside = datetime.combine(nm + timedelta(days=20), time(8))
+        end = datetime.combine(nm + timedelta(days=20), time(18))
+        result = self._assert_ok(self._rpc(
+            "fleetflow.readiness", "evaluate_readiness",
+            [self.company.id, veh_y.id, False, "rental", [],
+             inside.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")]))
+        reg_reasons = [r for r in result["reasons"] if r["check"] == "vehicle_registration"]
+        self.assertEqual(len(reg_reasons), 1, "one registration reason expected: %s" % result)
+        self.assertEqual(reg_reasons[0]["status"], "needs_review")
+        self.assertEqual(reg_reasons[0]["code"], "doc_validity_unknown")

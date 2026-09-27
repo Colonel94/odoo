@@ -21,6 +21,7 @@ import pytz
 from odoo.exceptions import AccessError, UserError
 from odoo.tests import tagged
 
+from ..models import constants
 from .common import OperationsCase
 
 TZ = pytz.timezone("Asia/Dubai")
@@ -167,6 +168,94 @@ class TestRenewalIdentity(OperationsCase):
         self.pred.invalidate_recordset()
         self.assertEqual(self.pred.superseded_by_id, r1)
 
+    # -- R1: a winning successor is recorded even when the predecessor was
+    #        already REVOKED before either approval -----------------------
+    def _iv_day(self, day, h1=8, h2=18):
+        return (TZ.localize(datetime.combine(day, time(h1))),
+                TZ.localize(datetime.combine(day, time(h2))))
+
+    def test_revoked_predecessor_competing_approvals_only_one_wins(self):
+        """R1 (public actions): the predecessor is revoked BEFORE either renewal is
+        approved. The first approval still wins its slot; a competing sibling is
+        refused; the predecessor stays rejected with its attribution and grants no
+        coverage; revoking either record does not reopen the sibling; an
+        independent credential is unaffected."""
+        nm = date.today() + timedelta(days=31)
+        r1_id = self.pred.with_user(self.compliance).action_supersede({
+            "name": "r1", "date_start": nm, "date_end": nm + timedelta(days=365)})
+        r2_id = self.pred.with_user(self.compliance).action_supersede({
+            "name": "r2", "date_start": nm, "date_end": nm + timedelta(days=365)})
+        r1 = self.pred.browse(r1_id)
+        r2 = self.pred.browse(r2_id)
+        # An independent, properly-verified credential on Car B (case C control).
+        indep = self.make_credential(
+            "vehicle_registration", "vehicle_id", self.vehicle_b,
+            start=date.today() - timedelta(days=5), end=date.today() + timedelta(days=300))
+
+        # Revoke the predecessor BEFORE approving either renewal.
+        self.pred.with_user(self.compliance).action_reject(reason="predecessor revoked")
+        v_by, v_on = self.pred.verified_by, self.pred.verified_on
+        self.assertEqual(self.pred.state, "rejected")
+        self.assertTrue(self.pred.revoked_by)
+
+        # First approval wins the slot even though the predecessor is already dead.
+        r1.with_user(self.compliance).action_verify()
+        self.pred.invalidate_recordset()
+        self.assertEqual(r1.state, "verified")
+        self.assertEqual(self.pred.superseded_by_id, r1)   # winner recorded
+        self.assertEqual(self.pred.state, "rejected")      # NOT resurrected
+        self.assertEqual(self.pred.verified_by, v_by)      # attribution preserved
+        self.assertEqual(self.pred.verified_on, v_on)
+        self.assertTrue(self.pred.revoked_by)              # revocation attribution kept
+
+        # The competing sibling approval is refused, and leaves NO partial change.
+        with self.assertRaises(UserError), self.cr.savepoint():
+            r2.with_user(self.compliance).action_verify()
+        r2.invalidate_recordset()
+        self.pred.invalidate_recordset()
+        self.assertEqual(r2.state, "draft")   # never-approved sibling left untouched
+        self.assertFalse(r2.verified_by)
+        self.assertFalse(r2.verified_on)
+        self.assertEqual(self.pred.superseded_by_id, r1)   # still the first winner
+
+        # Coverage: exactly the first renewal survives as an accepted successor.
+        Cred = self.env["fleetflow.credential"]
+        succ = Cred.search([("supersedes_id", "=", self.pred.id), ("state", "=", "verified")])
+        self.assertEqual(succ, r1)
+        inside = self._iv_day(nm + timedelta(days=10))
+        self.assertEqual(Cred._resolve_coverage(self.pred + r1 + r2, *inside, TZ), r1)
+        # The revoked predecessor itself grants nothing before the renewal starts.
+        self.assertFalse(Cred._resolve_coverage(
+            self.pred + r1 + r2, *self._iv_day(date.today()), TZ))
+        # The independent credential is untouched and still covers its own subject.
+        self.assertEqual(Cred._resolve_coverage(indep, *self._iv_day(date.today()), TZ), indep)
+
+        # Revoking the accepted successor must not erase the winner or reopen r2.
+        r1.with_user(self.compliance).action_reject(reason="successor revoked")
+        with self.assertRaises(UserError), self.cr.savepoint():
+            r2.with_user(self.compliance).action_verify()
+        self.pred.invalidate_recordset()
+        self.assertEqual(self.pred.superseded_by_id, r1)
+        r2.invalidate_recordset()
+        self.assertEqual(r2.state, "draft")
+
+    def test_revoked_predecessor_single_legitimate_renewal_still_approves(self):
+        """A lone legitimate renewal of a revoked predecessor is still approved for
+        its own validity period (the winner slot is recorded, not blocked)."""
+        nm = date.today() + timedelta(days=31)
+        r_id = self.pred.with_user(self.compliance).action_supersede({
+            "name": "solo", "date_start": nm, "date_end": nm + timedelta(days=365)})
+        r = self.pred.browse(r_id)
+        self.pred.with_user(self.compliance).action_reject(reason="revoked")
+        r.with_user(self.compliance).action_verify()
+        self.pred.invalidate_recordset()
+        self.assertEqual(r.state, "verified")
+        self.assertEqual(self.pred.state, "rejected")
+        self.assertEqual(self.pred.superseded_by_id, r)
+        Cred = self.env["fleetflow.credential"]
+        self.assertEqual(
+            Cred._resolve_coverage(self.pred + r, *self._iv_day(nm + timedelta(days=5)), TZ), r)
+
     # -- inconsistent legacy chain grants no coverage --------------------
     def test_inconsistent_legacy_chain_flagged_not_covered(self):
         r = self._renewal(verify=True)
@@ -183,6 +272,65 @@ class TestRenewalIdentity(OperationsCase):
         Cred = self.env["fleetflow.credential"]
         # The predecessor (superseded, ambiguous cutover) grants no coverage.
         self.assertFalse(Cred._resolve_coverage(self.pred, *iv(date.today()), TZ))
+
+    # -- R2: the inconsistent SUCCESSOR itself grants no trusted coverage,
+    #        detected on the successor (not only via the predecessor) ------
+    def test_inconsistent_successor_grants_no_coverage_from_either_side(self):
+        r = self._renewal(verify=True)
+        # A legacy inconsistent chain: the verified successor was redirected to a
+        # DIFFERENT vehicle (only reachable via ORM-level _apply, mimicking old
+        # data). Its own validity window is [nm, nm+365].
+        nm = date.today() + timedelta(days=31)
+        r._apply({"vehicle_id": self.vehicle_b.id})
+        r.invalidate_recordset()
+        self.pred.invalidate_recordset()
+        Cred = self.env["fleetflow.credential"]
+
+        # Pick an interval INSIDE the successor's own validity window (testing only a
+        # date before it starts would hide the defect).
+        inside = self._iv_day(nm + timedelta(days=20))
+
+        # 1) Directly through the successor's own validity/effective-interval helpers.
+        self.assertFalse(r._effective_interval(TZ)[2], "inconsistent successor must be unreliable")
+        self.assertEqual(r._validity(*inside, TZ), "unknown")
+
+        # 2) The successor ALONE grants no coverage (its own subject, own window).
+        self.assertFalse(Cred._resolve_coverage(r, *inside, TZ))
+
+        # 3) Alongside its predecessor, in BOTH record orders.
+        self.assertFalse(Cred._resolve_coverage(self.pred + r, *inside, TZ))
+        self.assertFalse(Cred._resolve_coverage(r + self.pred, *inside, TZ))
+
+        # 4) Through the ACTUAL readiness document check for the successor's subject
+        #    (Car B). Assert the affected reason's status/code specifically, so an
+        #    unrelated blocker cannot make the test pass by accident.
+        reason = self.env["fleetflow.readiness"]._check_document(
+            "vehicle_id", self.vehicle_b, "vehicle_registration", *inside, TZ)
+        self.assertEqual(reason["check"], "vehicle_registration")
+        self.assertEqual(reason["status"], constants.NEEDS_REVIEW)
+        self.assertEqual(reason["code"], "doc_validity_unknown")
+
+    def test_valid_same_identity_and_independent_controls_still_cover(self):
+        """Controls for R2: a valid same-identity renewal of a revoked predecessor
+        (case B) and an independent verified credential (case C) both still cover."""
+        Cred = self.env["fleetflow.credential"]
+        # Case B: same-identity renewal; revoke the predecessor, renewal still covers
+        # its own window.
+        r = self._renewal(verify=True)
+        nm = date.today() + timedelta(days=31)
+        self.pred.with_user(self.compliance).action_reject(reason="revoked after renewal")
+        self.assertEqual(
+            Cred._resolve_coverage(self.pred + r, *self._iv_day(nm + timedelta(days=10)), TZ), r)
+        # Case C: an independent, properly-verified credential on Car B.
+        indep = self.make_credential(
+            "vehicle_registration", "vehicle_id", self.vehicle_b,
+            start=date.today() - timedelta(days=5), end=date.today() + timedelta(days=300))
+        self.assertFalse(indep.supersedes_id)
+        self.assertEqual(Cred._resolve_coverage(indep, *self._iv_day(date.today()), TZ), indep)
+        reason = self.env["fleetflow.readiness"]._check_document(
+            "vehicle_id", self.vehicle_b, "vehicle_registration",
+            *self._iv_day(date.today()), TZ)
+        self.assertEqual(reason["status"], constants.READY)
 
     # -- copy path -------------------------------------------------------
     def test_copy_is_independent_not_a_linked_renewal(self):
