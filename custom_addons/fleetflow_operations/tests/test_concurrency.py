@@ -224,6 +224,7 @@ class TestConcurrency(TransactionCase):
             with reg.cursor() as cr:
                 env = api.Environment(cr, SUPERUSER_ID, {})
                 env["fleetflow.vehicle.hold"].search([("vehicle_id", "=", ids["vehicle"])]).unlink()
+                env["fleetflow.custody.event"].search([("vehicle_id", "=", ids["vehicle"])]).unlink()
                 env["fleetflow.allocation"].browse(ids["alloc"]).unlink()
                 env["fleetflow.credential"].search([
                     "|", ("vehicle_id", "=", ids["vehicle"]), ("driver_id", "=", ids["driver"])]).unlink()
@@ -310,6 +311,8 @@ class TestConcurrency(TransactionCase):
         with reg.cursor() as cr:
             env = api.Environment(cr, SUPERUSER_ID, {})
             env["fleetflow.vehicle.hold"].search([("vehicle_id", "=", ids["vehicle"])]).unlink()
+            env["fleetflow.custody.event"].search([
+                "|", ("vehicle_id", "=", ids["vehicle"]), ("driver_id", "=", ids["driver"])]).unlink()
             env["fleetflow.allocation"].search([
                 "|", ("vehicle_id", "=", ids["vehicle"]), ("driver_id", "=", ids["driver"])]).unlink()
             env["fleetflow.channel.enrolment"].search([

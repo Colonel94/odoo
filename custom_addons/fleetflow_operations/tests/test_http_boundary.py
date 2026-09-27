@@ -586,6 +586,54 @@ class TestHttpBoundary(HttpCase):
         self.assertEqual(r1.state, "verified")
         self.assertNotEqual(r2.state, "verified")           # sibling not approved
 
+    def test_B21_custody_workflow_over_rpc(self):
+        """H19: the full physical-custody workflow over authenticated JSON-RPC --
+        confirm, checkout (with odometer), return -- produces paired immutable
+        custody events and leaves the vehicle available again."""
+        self.authenticate("http.disp", PW)
+        veh = self.env["fleet.vehicle"].sudo().create({
+            "model_id": self.vehicle.model_id.id, "license_plate": "HTTP-CUST",
+            "company_id": self.company.id, "ff_operator_company_id": self.company.id,
+            "ff_operational_state": "reviewed"})
+        drv = self.env["fleetflow.driver"].sudo().create({
+            "name": "HTTP cust driver", "employee_ref": "HTTP-CD", "company_id": self.company.id})
+        for kind, field, subj in (("vehicle_registration", "vehicle_id", veh),
+                                  ("insurance", "vehicle_id", veh),
+                                  ("driver_licence", "driver_id", drv)):
+            c = self.env["fleetflow.credential"].sudo().create({
+                "name": "%s-cust" % kind, "doc_kind": kind, "company_id": self.company.id,
+                field: subj.id, "date_start": date.today() - timedelta(days=10),
+                "date_end": date.today() + timedelta(days=365)})
+            c.action_verify()
+        enr_ids = []
+        for field, subj in (("vehicle_id", veh), ("driver_id", drv)):
+            enr = self.env["fleetflow.channel.enrolment"].sudo().create({
+                "company_id": self.company.id, "channel": "uber", "product": "UberX",
+                "city": "Dubai", field: subj.id})
+            enr.action_approve()
+            enr_ids.append(enr.id)
+        now = datetime.utcnow()
+        start = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        end = (now + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        alloc_id = self._assert_ok(self._rpc("fleetflow.allocation", "create", [{
+            "operating_mode": "chauffeur", "city": "Dubai", "vehicle_id": veh.id,
+            "driver_id": drv.id, "planned_start": start, "planned_end": end,
+            "channel_enrolment_ids": [(6, 0, enr_ids)]}]))
+        self._assert_ok(self._rpc("fleetflow.allocation", "action_confirm", [[alloc_id]]))
+        self._assert_ok(self._rpc("fleetflow.allocation", "action_checkout", [[alloc_id]],
+                                  {"odometer": 500}))
+        alloc = self.env["fleetflow.allocation"].browse(alloc_id)
+        alloc.invalidate_recordset()
+        self.assertEqual(alloc.state, "checked_out")
+        self.assertTrue(alloc.checkout_event_id)
+        self._assert_ok(self._rpc("fleetflow.allocation", "action_return", [[alloc_id]],
+                                  {"odometer": 650}))
+        alloc.invalidate_recordset()
+        self.assertEqual(alloc.state, "returned")
+        self.assertEqual(sorted(alloc.custody_event_ids.mapped("event_type")),
+                         ["checkout", "return"])
+        self.assertEqual(alloc.distance_travelled_km, 150.0)
+
     def test_B20_inconsistent_successor_needs_review_over_rpc(self):
         """R2 over the authenticated API: an inconsistent legacy chain (successor
         redirected to a different vehicle) must not supply trusted coverage. The

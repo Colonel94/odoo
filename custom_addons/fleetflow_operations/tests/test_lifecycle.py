@@ -60,7 +60,7 @@ class TestLifecycleBypass(OperationsCase):
         self.assertEqual(alloc.state, "confirmed")
 
     def test_checked_out_reset_to_draft_refused(self):
-        alloc = self.make_allocation(channels=self.enr, user=self.dispatcher)
+        alloc = self.make_allocation(*self.checkout_interval(), channels=self.enr, user=self.dispatcher)
         alloc.action_confirm()
         alloc.action_checkout(odometer=100)
         with self.assertRaises(AccessError):

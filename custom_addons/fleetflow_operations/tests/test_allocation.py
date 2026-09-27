@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime, time, timedelta, date
 
+from odoo import fields
 from odoo.exceptions import UserError, ValidationError
 from odoo.tests import tagged
 
@@ -20,7 +21,7 @@ class TestAllocation(OperationsCase):
         return datetime.combine(day, time(sh, 0)), datetime.combine(day, time(eh, 0))
 
     def test_confirm_ready_then_checkout_and_return(self):
-        alloc = self.make_allocation(channels=self.enr, user=self.dispatcher)
+        alloc = self.make_allocation(*self.checkout_interval(), channels=self.enr, user=self.dispatcher)
         alloc.action_confirm()
         self.assertEqual(alloc.state, "confirmed")
         self.assertEqual(alloc.readiness_status, "ready")
@@ -79,24 +80,29 @@ class TestAllocation(OperationsCase):
         self.assertEqual(b.state, "confirmed")
 
     def test_late_return_blocks_second_checkout(self):
-        s1, e1 = self._interval(8, 12)
-        s2, e2 = self._interval(12, 16)
-        a = self.make_allocation(s1, e1, channels=self.enr, user=self.dispatcher)
+        # A generous early-handover tolerance so B's near-future checkout timing is
+        # allowed and the test isolates the CUSTODY block (vehicle still out), not
+        # the timing policy (covered separately).
+        self.company.sudo().write({"ff_checkout_early_tolerance_minutes": 240})
+        now = fields.Datetime.now()
+        a = self.make_allocation(now - timedelta(hours=1), now + timedelta(minutes=30),
+                                 channels=self.enr, user=self.dispatcher)
         a.action_confirm()
-        a.action_checkout()  # out, not yet returned (late return)
-        b = self.make_allocation(s2, e2, channels=self.enr, user=self.dispatcher)
+        a.action_checkout(odometer=100)  # out, not yet returned (late return)
+        b = self.make_allocation(now + timedelta(minutes=30), now + timedelta(hours=4),
+                                 channels=self.enr, user=self.dispatcher)
         b.action_confirm()  # planning ok (adjacent)
         with self.assertRaises(UserError):
-            b.action_checkout()  # blocked: vehicle still physically out
+            b.action_checkout(odometer=100)  # blocked: vehicle still physically out
 
     def test_active_hold_blocks_checkout(self):
-        alloc = self.make_allocation(channels=self.enr, user=self.dispatcher)
+        alloc = self.make_allocation(*self.checkout_interval(), channels=self.enr, user=self.dispatcher)
         alloc.action_confirm()
         self.env["fleetflow.vehicle.hold"].create({
             "vehicle_id": self.vehicle.id, "hold_type": "safety", "reason": "brake fault",
             "dispatch_blocking": True})
         with self.assertRaises(UserError):
-            alloc.action_checkout()
+            alloc.action_checkout(odometer=100)
 
     def test_clearing_one_hold_keeps_others(self):
         h1 = self.env["fleetflow.vehicle.hold"].create({
@@ -137,14 +143,14 @@ class TestAllocation(OperationsCase):
             shift.action_confirm()
 
     def test_odometer_decrease_rejected(self):
-        alloc = self.make_allocation(channels=self.enr, user=self.dispatcher)
+        alloc = self.make_allocation(*self.checkout_interval(), channels=self.enr, user=self.dispatcher)
         alloc.action_confirm()
         alloc.action_checkout(odometer=5000)
         with self.assertRaises(ValidationError):
             alloc.action_return(odometer=4000)  # silent decrease not accepted
 
     def test_defect_return_creates_hold_and_order(self):
-        alloc = self.make_allocation(channels=self.enr, user=self.dispatcher)
+        alloc = self.make_allocation(*self.checkout_interval(), channels=self.enr, user=self.dispatcher)
         alloc.action_confirm()
         alloc.action_checkout(odometer=100)
         orders_before = self.env["fleetflow.order"].search_count([("vehicle_id", "=", self.vehicle.id)])

@@ -68,33 +68,33 @@ class TestPrivacyCustody(OperationsCase):
 
     # -- F09: custody integrity ------------------------------------------
     def test_return_zero_does_not_bypass_decrease(self):
-        alloc = self.make_allocation(channels=self.enr, user=self.dispatcher)
+        alloc = self.make_allocation(*self.checkout_interval(), channels=self.enr, user=self.dispatcher)
         alloc.action_confirm()
         alloc.action_checkout(odometer=5000)
         with self.assertRaises(ValidationError):
             alloc.action_return(odometer=0)
 
     def test_infinite_odometer_rejected(self):
-        alloc = self.make_allocation(channels=self.enr, user=self.dispatcher)
+        alloc = self.make_allocation(*self.checkout_interval(), channels=self.enr, user=self.dispatcher)
         alloc.action_confirm()
         with self.assertRaises(ValidationError):
             alloc.action_checkout(odometer=float("inf"))
         self.assertEqual(alloc.state, "confirmed")
 
     def test_odometer_below_last_accepted_rejected(self):
-        s1, e1 = self._iv(8, 12)
-        s2, e2 = self._iv(13, 17)
-        a = self.make_allocation(s1, e1, channels=self.enr, user=self.dispatcher)
+        # a fully completes (checkout+return) advancing the vehicle's trusted km to
+        # 3000; b then cannot check out below that, even on a fresh allocation.
+        a = self.make_allocation(*self.checkout_interval(), channels=self.enr, user=self.dispatcher)
         a.action_confirm()
         a.action_checkout(odometer=2000)
         a.action_return(odometer=3000)
-        b = self.make_allocation(s2, e2, channels=self.enr, user=self.dispatcher)
+        b = self.make_allocation(*self.checkout_interval(), channels=self.enr, user=self.dispatcher)
         b.action_confirm()
         with self.assertRaises(ValidationError):
             b.action_checkout(odometer=1000)  # below the last accepted 3000
 
     def test_defect_links_allocation_order_and_hold(self):
-        alloc = self.make_allocation(channels=self.enr, user=self.dispatcher)
+        alloc = self.make_allocation(*self.checkout_interval(), channels=self.enr, user=self.dispatcher)
         alloc.action_confirm()
         alloc.action_checkout(odometer=100)
         alloc.action_return(odometer=150, defect=True, condition="warning light")

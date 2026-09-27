@@ -97,6 +97,13 @@ class OperationsCase(TransactionCase):
         end = datetime.combine(day, time(end_hour, 0))
         return start, end
 
+    def checkout_interval(self, before_h=1, after_h=8):
+        """A reservation window whose planned start is already in the past, so a
+        checkout NOW is inside the handover window under the OPS-2A timing policy
+        (checkout is allowed from planned_start until planned_end)."""
+        now = fields.Datetime.now()
+        return now - timedelta(hours=before_h), now + timedelta(hours=after_h)
+
     def ready_chauffeur_setup(self):
         """A fully-eligible chauffeur setup; individual tests then break one thing."""
         self.vehicle.write({"ff_operator_company_id": self.company.id})
