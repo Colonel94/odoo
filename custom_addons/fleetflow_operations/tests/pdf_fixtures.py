@@ -211,6 +211,72 @@ ENCRYPTED_PDF = build_pdf([
         b"/U (00000000000000000000000000000000) /P -44 >>"),
 ], trailer_encrypt="4 0 R")
 
+# ---------------------------------------------------------------------------
+# Indirect semantic-value cases: /S, /Type and /Subtype whose VALUE is an
+# indirect object. A comparison against the reference (rather than the resolved
+# name) would let these bypass the policy. All reach the action via /A (not a
+# banned key), so ONLY value resolution can catch them.
+# ---------------------------------------------------------------------------
+# /S stored as an indirect object resolving to /Launch.
+S_INDIRECT_PDF = build_pdf([
+    (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+    (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R] >>"),
+    (4, b"<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /A 5 0 R >>"),
+    (5, b"<< /S 6 0 R >>"),
+    (6, b"/Launch"),
+])
+
+# /Type stored as an indirect object resolving to /EmbeddedFile.
+TYPE_INDIRECT_PDF = build_pdf([
+    (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+    (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R] >>"),
+    (4, b"<< /Type 5 0 R /Rect [0 0 10 10] >>"),
+    (5, b"/EmbeddedFile"),
+])
+
+# /Subtype stored as an indirect object resolving to /Screen.
+SUBTYPE_INDIRECT_PDF = build_pdf([
+    (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+    (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R] >>"),
+    (4, b"<< /Type /Annot /Subtype 5 0 R /Rect [0 0 10 10] >>"),
+    (5, b"/Screen"),
+])
+
+# A reference CHAIN: /S -> obj5 -> obj6 -> /Launch.
+S_REF_CHAIN_PDF = build_pdf([
+    (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+    (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R] >>"),
+    (4, b"<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /A 5 0 R >>"),
+    (5, b"<< /S 6 0 R >>"),
+    (6, b"7 0 R"),
+    (7, b"/Launch"),
+])
+
+# An indirect /S resolving to a hex-escaped /Laun#63h (== /Launch).
+S_INDIRECT_ESCAPED_PDF = build_pdf([
+    (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+    (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R] >>"),
+    (4, b"<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /A 5 0 R >>"),
+    (5, b"<< /S 6 0 R >>"),
+    (6, b"/Laun#63h"),
+])
+
+# A cyclic reference in the /S value (obj6 <-> obj7): must fail safe, not loop.
+S_CYCLIC_PDF = build_pdf([
+    (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+    (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R] >>"),
+    (4, b"<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /A 5 0 R >>"),
+    (5, b"<< /S 6 0 R >>"),
+    (6, b"7 0 R"),
+    (7, b"6 0 R"),
+])
+
 BAD_PDFS = {
     "fake_header": FAKE_HEADER_PDF,
     "truncated": TRUNCATED_PDF,
@@ -224,7 +290,27 @@ BAD_PDFS = {
     "aa": AA_PDF,
     "incremental_update_js": INCREMENTAL_UPDATE_JS_PDF,
     "encrypted": ENCRYPTED_PDF,
+    # indirect semantic values
+    "s_indirect": S_INDIRECT_PDF,
+    "type_indirect": TYPE_INDIRECT_PDF,
+    "subtype_indirect": SUBTYPE_INDIRECT_PDF,
+    "s_ref_chain": S_REF_CHAIN_PDF,
+    "s_indirect_escaped": S_INDIRECT_ESCAPED_PDF,
+    "s_cyclic": S_CYCLIC_PDF,
 }
+
+# A VALID PDF that uses indirect /Subtype (-> /Link) and indirect /S (-> /URI):
+# harmless indirect values must still be ACCEPTED (no blanket indirect blacklist).
+INDIRECT_OK_PDF = build_pdf([
+    (1, b"<< /Type /Catalog /Pages 2 0 R >>"),
+    (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+    (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R] >>"),
+    (4, b"<< /Type /Annot /Subtype 5 0 R /Rect [0 0 10 10] /A 6 0 R >>"),
+    (5, b"/Link"),
+    (6, b"<< /S 7 0 R >>"),
+    (7, b"/URI"),
+])
+VALID_PDFS["indirect_ok"] = INDIRECT_OK_PDF
 
 # A small genuinely-valid PDF for use as an accepted evidence source across the
 # lifecycle/HTTP tests (replaces the earlier structurally-invalid stubs).

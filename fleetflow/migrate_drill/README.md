@@ -65,3 +65,17 @@ FF_WS="$NEW" dc down -v
 
 Expected: `SEED_OK …` after step 2, `module fleetflow_operations: Running migration
 [16.0.1.2.0>] post-migrate` during the upgrade, and `ASSERT_OK …` after step 3.
+
+## Linked-renewal identity safety drill (`c1_seed.py` / `c1_assert.py`)
+
+A focused variant proving the linked-renewal identity correction is safe for data
+created by the earlier code. Set `BASELINE=d0486a74` (the code that still allowed a
+draft renewal to be redirected), and in the steps above use
+`FF_DRILL=/workspace/fleetflow/migrate_drill/c1_seed.py` for the seed and
+`.../c1_assert.py` for the assertion. The seed reproduces the old bug (redirects a
+linked renewal to a different vehicle and verifies it); after upgrading to the new
+code the assertion confirms the stored identities and the replacement link are
+PRESERVED (never rewritten) and that the inconsistent chain now grants no coverage
+(it is flagged for review). There is no schema change in this correction, so no
+migration script runs; the drill proves the read-time semantics are data-safe.
+Expected: `C1_SEED_OK …` then `C1_ASSERT_OK …`.

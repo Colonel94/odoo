@@ -4,6 +4,11 @@ from odoo.exceptions import AccessError, UserError, ValidationError
 
 from . import constants
 
+# Sentinel: a PDF name value that could not be resolved within budget (a cycle or
+# an over-long indirect chain). Treated as unresolvable -> the document is rejected
+# rather than silently passed.
+_PDF_UNRESOLVED = object()
+
 
 class FleetflowCredential(models.Model):
     """A single piece of compliance evidence with a verification lifecycle.
@@ -81,8 +86,13 @@ class FleetflowCredential(models.Model):
 
     # Fields that may never be forged through create/write/import/context.
     _PROTECTED = {"verified_by", "verified_on", "superseded_by_id", "supersedes_id",
-                  "ever_verified", "revoked_by", "revoked_on", "revoke_reason",
+                  "ever_verified", "revoked_by", "revoke_reason", "revoked_on",
                   "replaced_on"}
+    # Identity of the compliance claim: the operating company, the subject (type
+    # and record) and the document kind. A linked renewal inherits these from the
+    # evidence it replaces and may NOT change them -- a different claim is a new
+    # independent credential, never a redirected renewal.
+    _IDENTITY = {"company_id", "operator_company_id", "vehicle_id", "driver_id", "doc_kind"}
 
     @api.depends("operator_company_id", "vehicle_id", "driver_id")
     def _compute_subject_kind(self):
@@ -177,6 +187,22 @@ class FleetflowCredential(models.Model):
                         "Evidence %s is %s and locked. Supersede it with a renewal "
                         "instead of editing it."
                     ) % (rec.name, rec.state))
+        # A LINKED renewal (one that supersedes an earlier document) keeps that
+        # document's exact identity for its whole lifecycle, not only at create
+        # time: its operating company, subject type, subject record and document
+        # kind cannot be redirected while it is still a draft/pending. Dates,
+        # issuer/reference and the replacement upload stay editable -- only the
+        # identity is fixed. Superuser (fixtures/migration) is exempt.
+        touched_identity = self._IDENTITY & set(vals)
+        if touched_identity and not self.env.su:
+            for rec in self:
+                pred = rec.supersedes_id
+                if pred and rec._identity_diff(vals, pred):
+                    raise UserError(_(
+                        "Evidence %s is a linked renewal and must keep the operating "
+                        "company, subject and document kind of the evidence it "
+                        "replaces. Create a separate credential for a different "
+                        "claim instead of redirecting the renewal.") % rec.name)
         res = super().write(vals)
         if "attachment_id" in vals:
             self._bind_attachment()
@@ -200,6 +226,32 @@ class FleetflowCredential(models.Model):
         # Internal transition used by the review actions; bypasses the public
         # write guard by writing at the ORM level.
         return super().write(vals)
+
+    def _identity_diff(self, vals, other):
+        """True if applying `vals` to this record would make any identity field
+        (company/subject/doc_kind) differ from `other`'s value for that field."""
+        self.ensure_one()
+        for field in self._IDENTITY & set(vals):
+            target = other[field]
+            if field == "doc_kind":
+                if (vals[field] or False) != (target or False):
+                    return True
+            else:  # many2one -> compare ids
+                new_id = int(vals[field]) if vals[field] else False
+                if new_id != (target.id if target else False):
+                    return True
+        return False
+
+    def _same_identity(self, other):
+        """True if this record shares the whole compliance identity of `other`:
+        operating company, subject type, exact subject and document kind."""
+        self.ensure_one()
+        return (self.company_id == other.company_id
+                and self.subject_kind == other.subject_kind
+                and self.operator_company_id == other.operator_company_id
+                and self.vehicle_id == other.vehicle_id
+                and self.driver_id == other.driver_id
+                and self.doc_kind == other.doc_kind)
 
     # Evidence document policy: allowed types (validated on the real bytes, not
     # the filename) and a hard size ceiling. Active/script content is rejected.
@@ -267,6 +319,7 @@ class FleetflowCredential(models.Model):
     _PDF_MAX_PAGES = 4000
     _PDF_MAX_OBJECTS = 60000
     _PDF_MAX_DEPTH = 60
+    _PDF_MAX_REF_CHAIN = 32  # max indirect hops when resolving a semantic value
     _IMAGE_MAX_PIXELS = 40_000_000  # bounded decompression (header dimensions)
 
     def _validate_evidence_file(self, att_su):
@@ -359,24 +412,52 @@ class FleetflowCredential(models.Model):
                        lambda m: chr(int(m.group(1), 16)), s)
         return s
 
+    def _pdf_resolve_value(self, value):
+        """Resolve an indirect reference to the value it names, for a SEMANTIC name
+        comparison, so a prohibited /S, /Type or /Subtype stored as `N 0 R` is
+        judged by the name it points at -- not by the (harmless-looking) reference.
+
+        Bounded against cycles and over-long chains (returns the sentinel
+        `_PDF_UNRESOLVED`); a broken reference raises inside PyPDF2 and is turned
+        into a business rejection by the caller. A direct value is returned as-is.
+        """
+        from PyPDF2.generic import IndirectObject
+        seen, hops = set(), 0
+        while isinstance(value, IndirectObject):
+            ref = (value.idnum, value.generation)
+            if ref in seen or hops >= self._PDF_MAX_REF_CHAIN:
+                return _PDF_UNRESOLVED
+            seen.add(ref)
+            hops += 1
+            value = value.getObject()  # broken ref -> PdfReadError (business error)
+        return value
+
+    def _pdf_check_name(self, value, banned, message):
+        if value is None:
+            return
+        resolved = self._pdf_resolve_value(value)
+        if resolved is _PDF_UNRESOLVED:
+            raise UserError(_(
+                "The PDF has a cyclic or unresolvable feature reference that cannot "
+                "be validated with confidence."))
+        name = self._pdf_norm_name(resolved)
+        if name in banned:
+            raise UserError(message % name)
+
     def _pdf_check_dict(self, dico):
+        # Dictionary KEYS are always direct names.
         norm = {self._pdf_norm_name(k): v for k, v in dico.items()}
         banned = set(norm) & self._PDF_BANNED_KEYS
         if banned:
             raise UserError(_(
                 "The PDF carries a prohibited feature (%s), which is not allowed in "
                 "static evidence.") % ", ".join(sorted(banned)))
-        action = norm.get("/S")
-        if action is not None and self._pdf_norm_name(action) in self._PDF_BANNED_ACTIONS:
-            raise UserError(_(
-                "The PDF carries a prohibited action (%s).")
-                % self._pdf_norm_name(action))
+        # Semantic VALUES may be stored indirectly: resolve while keeping the key.
+        self._pdf_check_name(norm.get("/S"), self._PDF_BANNED_ACTIONS,
+                             _("The PDF carries a prohibited action (%s)."))
         for key in ("/Type", "/Subtype"):
-            value = norm.get(key)
-            if value is not None and self._pdf_norm_name(value) in self._PDF_BANNED_TYPES:
-                raise UserError(_(
-                    "The PDF carries a prohibited object type (%s).")
-                    % self._pdf_norm_name(value))
+            self._pdf_check_name(norm.get(key), self._PDF_BANNED_TYPES,
+                                 _("The PDF carries a prohibited object type (%s)."))
 
     def _pdf_scan_prohibited(self, root):
         """Bounded walk of the reachable object graph from the catalog, resolving
@@ -439,6 +520,24 @@ class FleetflowCredential(models.Model):
                     "effective (Valid from) date before it can be approved. Record "
                     "one, or return it for review.") % rec.name)
         now = fields.Datetime.now()
+        # Lock the records being verified and RE-VALIDATE renewal identity against
+        # the predecessor immediately before approval. The create-time restriction
+        # and the write guard already fix the identity, but this row lock + re-read
+        # closes the workflow end-to-end: a redirected renewal (however it was
+        # edited, including a concurrent identity write that committed after this
+        # transaction started) cannot be approved as a continuation of a claim it no
+        # longer matches. The predecessor's identity is authoritative and immutable.
+        for cid in sorted(self.ids):
+            self.env.cr.execute(
+                "SELECT id FROM fleetflow_credential WHERE id = %s FOR UPDATE", (cid,))
+        self.invalidate_recordset(list(self._IDENTITY) + ["subject_kind", "supersedes_id"])
+        for rec in self:
+            if rec.supersedes_id and not rec._same_identity(rec.supersedes_id):
+                raise UserError(_(
+                    "Evidence %s no longer matches the operating company, subject or "
+                    "document kind of the evidence it replaces, so it cannot be "
+                    "approved as its renewal. Create an independent credential "
+                    "instead.") % rec.name)
         # Re-validate the source file against its CURRENT bytes immediately before
         # verifying, under a row lock, THEN bump the source-lock counter so the
         # approval is a committed write on that row. This closes two gaps: a file
@@ -476,7 +575,12 @@ class FleetflowCredential(models.Model):
                 "SELECT id FROM fleetflow_credential WHERE id = %s FOR UPDATE",
                 (predecessor.id,))
             predecessor.invalidate_recordset(["state", "superseded_by_id"])
-            if (predecessor.state == "superseded"
+            # A single unambiguous approved replacement: if the predecessor is
+            # already linked to a DIFFERENT successor it cannot be replaced again --
+            # judged on the actual relationship link, not merely the current state
+            # (an earlier successor may since have been revoked without clearing the
+            # link, and the predecessor must not silently gain a second successor).
+            if (predecessor.superseded_by_id
                     and predecessor.superseded_by_id != rec):
                 raise UserError(_(
                     "Evidence %s has already been replaced by another approved "
@@ -572,6 +676,11 @@ class FleetflowCredential(models.Model):
         self.ensure_one()
         succ = self.superseded_by_id
         if not succ or not succ.date_start or succ.date_precision != "day":
+            return None
+        # Defensive: an inconsistent legacy chain whose successor does not share
+        # this record's compliance identity is flagged for review (no cutover, so
+        # no coverage is granted), never silently trusted or rewritten.
+        if not self._same_identity(succ):
             return None
         return self._local_midnight(succ.date_start, tz)
 

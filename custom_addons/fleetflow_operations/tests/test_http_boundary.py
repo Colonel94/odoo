@@ -462,8 +462,11 @@ class TestHttpBoundary(HttpCase):
             "attachment_id": ok_att}]))
         self._assert_ok(self._rpc("fleetflow.credential", "action_verify", [[cred_id]]))
         # A PDF whose JavaScript is reachable only by resolving an indirect object,
-        # and a plausible-header-but-structureless PDF, are both rejected at bind.
-        for key in ("js_indirect", "fake_header", "encrypted"):
+        # a prohibited action/subtype stored as an INDIRECT value, a cyclic feature
+        # reference, and a plausible-header-but-structureless PDF are all rejected
+        # at bind with a BUSINESS error (never a 500).
+        for key in ("js_indirect", "s_indirect", "subtype_indirect", "s_cyclic",
+                    "fake_header", "encrypted"):
             bad_att = self._assert_ok(self._rpc("ir.attachment", "create", [{
                 "name": "%s.pdf" % key, "datas": base64.b64encode(BAD_PDFS[key]).decode()}]))
             body = self._rpc("fleetflow.credential", "create", [{
@@ -503,3 +506,45 @@ class TestHttpBoundary(HttpCase):
         self.assertNotEqual(self._insurance_code(1), "doc_expired")   # predecessor
         self.assertNotEqual(self._insurance_code(3), "doc_expired")   # successor
         self.assertEqual(self._insurance_code(20), "doc_expired")     # no fallback
+
+    # ------------------------------------------------------------------
+    # B18 -- a linked renewal cannot be redirected to a different subject or
+    #        document kind over RPC, while a legitimate same-identity renewal
+    #        still verifies (C1).
+    # ------------------------------------------------------------------
+    def test_B18_linked_renewal_identity_protected_over_rpc(self):
+        self.authenticate("http.comp", PW)
+        # Fresh, self-contained fixtures (do not reuse cls.reg, which B05 supersedes).
+        veh_c, veh_b = self.env["fleet.vehicle"].sudo().create([
+            {"model_id": self.vehicle.model_id.id, "license_plate": "HTTP-C",
+             "company_id": self.company.id, "ff_operator_company_id": self.company.id},
+            {"model_id": self.vehicle.model_id.id, "license_plate": "HTTP-B",
+             "company_id": self.company.id, "ff_operator_company_id": self.company.id}])
+        cred_id = self._assert_ok(self._rpc("fleetflow.credential", "create", [{
+            "name": "b18-reg", "doc_kind": "vehicle_registration",
+            "company_id": self.company.id, "vehicle_id": veh_c.id,
+            "date_start": (date.today() - timedelta(days=10)).isoformat(),
+            "date_end": (date.today() + timedelta(days=200)).isoformat()}]))
+        self._assert_ok(self._rpc("fleetflow.credential", "action_verify", [[cred_id]]))
+        nm = date.today() + timedelta(days=31)
+        renewal_id = self._assert_ok(self._rpc(
+            "fleetflow.credential", "action_supersede", [[cred_id], {
+                "name": "b18-renewal", "date_start": nm.isoformat(),
+                "date_end": (nm + timedelta(days=365)).isoformat()}]))
+        # Redirecting the renewal's subject or document kind is refused, unchanged.
+        self._assert_denied(self._rpc(
+            "fleetflow.credential", "write", [[renewal_id], {"vehicle_id": veh_b.id}]))
+        self._assert_denied(self._rpc(
+            "fleetflow.credential", "write", [[renewal_id], {"doc_kind": "insurance"}]))
+        r = self.env["fleetflow.credential"].browse(renewal_id)
+        r.invalidate_recordset()
+        self.assertEqual(r.vehicle_id, veh_c)
+        self.assertEqual(r.doc_kind, "vehicle_registration")
+        # A legitimate edit is allowed and the same-identity renewal verifies.
+        self._assert_ok(self._rpc("fleetflow.credential", "write",
+                                  [[renewal_id], {"issuer": "RTA"}]))
+        self._assert_ok(self._rpc("fleetflow.credential", "action_verify", [[renewal_id]]))
+        cred = self.env["fleetflow.credential"].browse(cred_id)
+        cred.invalidate_recordset()
+        self.assertEqual(cred.state, "superseded")
+        self.assertEqual(cred.superseded_by_id.id, renewal_id)

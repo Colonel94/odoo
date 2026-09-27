@@ -87,3 +87,33 @@ class TestPdfValidation(OperationsCase):
         with self.assertRaises(UserError):
             cred.with_user(self.compliance).action_verify()
         self.assertNotEqual(cred.state, "verified")
+
+    # -- C2: indirect semantic values (/S, /Type, /Subtype) --------------
+    def test_indirect_action_and_type_values_rejected(self):
+        # A prohibited /S, /Type or /Subtype stored as an indirect object (or a
+        # reference chain, or a hex-escaped indirect name) is rejected on the
+        # RESOLVED value, not the reference.
+        for key in ("s_indirect", "type_indirect", "subtype_indirect",
+                    "s_ref_chain", "s_indirect_escaped"):
+            with self.subTest(pdf=key), self.cr.savepoint():
+                with self.assertRaises(UserError, msg="indirect bypass: %s" % key):
+                    self._bind(BAD_PDFS[key], "%s.pdf" % key)
+
+    def test_cyclic_reference_fails_safe_as_business_error(self):
+        # A cyclic feature reference must fail safe (a business validation error),
+        # never hang or surface as an unexpected programming error.
+        with self.assertRaises(UserError):
+            self._bind(BAD_PDFS["s_cyclic"], "cyclic.pdf")
+
+    def test_harmless_indirect_values_accepted(self):
+        # Indirect /Subtype (-> /Link) and indirect /S (-> /URI) are harmless and
+        # must still be accepted: no blanket blacklist of indirect objects.
+        cred = self._bind(VALID_PDFS["indirect_ok"], "indirect_ok.pdf")
+        cred.with_user(self.compliance).action_verify()
+        self.assertEqual(cred.state, "verified")
+
+    def test_indirect_direct_action_still_rejected(self):
+        # The same prohibited action with a DIRECT /S name is rejected too (parity
+        # with the indirect case).
+        with self.assertRaises(UserError):
+            self._bind(BAD_PDFS["launch_annot"], "direct.pdf")
