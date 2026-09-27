@@ -93,3 +93,25 @@ independent verified credential for Car D.
 There is no schema change in this correction, so no migration script runs; the
 drill proves the read-time semantics are data-safe.
 Expected: `C1_SEED_OK …` then `C1_ASSERT_OK …`.
+
+## Physical-custody migration drill (`c2_seed.py` / `c2_assert.py`)
+
+Proves the OPS-2A custody schema addition is safe for data created before custody
+events existed. Set `BASELINE=736752af` (the pre-OPS-2A head, module 16.0.1.2.0) and
+use `FF_DRILL=/workspace/fleetflow/migrate_drill/c2_seed.py` for the seed and
+`.../c2_assert.py` for the assertion.
+
+`c2_seed.py` (old code) creates a confirmed allocation, a currently checked-out
+allocation, a returned-clean allocation and a returned-with-defect allocation (which
+raised a hold + work order under the old code), each with mileage recorded only in
+allocation fields.
+
+Upgrading to the new code runs the `16.0.1.3.0` migration
+(`module fleetflow_operations: Running migration [16.0.1.3.0>] post-migrate`).
+`c2_assert.py` (new code) confirms: allocation ids/states/planned/actual timestamps,
+mileage and defect flags and the existing hold/work-order links are preserved; legacy
+`fleetflow.custody.event` records are reconstructed for the checked-out and returned
+allocations with the recorded custody TIMESTAMP kept, the handover ACTOR left empty
+(unknown, never fabricated) and `is_legacy` set; the confirmed allocation has no
+events; and the vehicle's trusted odometer is seeded from the highest legacy reading
+in canonical km. Expected: `C2_SEED_OK …` then `C2_ASSERT_OK …`.
