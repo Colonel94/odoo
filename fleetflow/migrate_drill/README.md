@@ -72,10 +72,24 @@ A focused variant proving the linked-renewal identity correction is safe for dat
 created by the earlier code. Set `BASELINE=d0486a74` (the code that still allowed a
 draft renewal to be redirected), and in the steps above use
 `FF_DRILL=/workspace/fleetflow/migrate_drill/c1_seed.py` for the seed and
-`.../c1_assert.py` for the assertion. The seed reproduces the old bug (redirects a
-linked renewal to a different vehicle and verifies it); after upgrading to the new
-code the assertion confirms the stored identities and the replacement link are
-PRESERVED (never rewritten) and that the inconsistent chain now grants no coverage
-(it is flagged for review). There is no schema change in this correction, so no
-migration script runs; the drill proves the read-time semantics are data-safe.
+`.../c1_assert.py` for the assertion.
+
+`c1_seed.py` (old code) seeds three cases, each credential carrying a real PDF
+source file: (1) the inconsistent bug — a linked renewal redirected from Car A to
+Car B and verified; (2) a valid same-identity renewal chain for Car C; and (3) an
+independent verified credential for Car D.
+
+`c1_assert.py` (new code) confirms:
+- stored identities, replacement links, states, verification attribution and
+  source-byte SHA-256 hashes are PRESERVED (never rewritten) for all three cases;
+- the inconsistent chain grants NO trusted coverage from EITHER side — the
+  predecessor (superseded, ambiguous cutover) and the redirected successor
+  (evaluated on itself), alone and together in both record orders, over an interval
+  INSIDE the successor's own validity window — and the actual readiness document
+  check returns needs-review/`doc_validity_unknown` for BOTH affected subjects;
+- the valid same-identity chain still covers on both sides of its cutover, and the
+  independent credential is still evaluated normally.
+
+There is no schema change in this correction, so no migration script runs; the
+drill proves the read-time semantics are data-safe.
 Expected: `C1_SEED_OK …` then `C1_ASSERT_OK …`.
