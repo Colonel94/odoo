@@ -102,6 +102,29 @@
         <field name="domain_force">[('company_id', 'in', company_ids)]</field>
     </record>
 
+    <!-- Custody events: a company never sees another company's custody history. -->
+    <record id="rule_custody_company" model="ir.rule">
+        <field name="name">Custody event: company isolation</field>
+        <field name="model_id" ref="model_fleetflow_custody_event"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+
+    <!-- A driver sees only their own custody events; staff see all company ones. -->
+    <record id="rule_custody_driver_self" model="ir.rule">
+        <field name="name">Custody event: driver own only</field>
+        <field name="model_id" ref="model_fleetflow_custody_event"/>
+        <field name="groups" eval="[(4, ref('group_ops_driver'))]"/>
+        <field name="domain_force">[('driver_id.user_id', '=', user.id)]</field>
+    </record>
+
+    <record id="rule_custody_staff_all" model="ir.rule">
+        <field name="name">Custody event: staff see all company events</field>
+        <field name="model_id" ref="model_fleetflow_custody_event"/>
+        <field name="groups" eval="[(4, ref('group_ops_dispatcher')), (4, ref('group_ops_compliance')), (4, ref('group_ops_fleet_manager'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+
     <!-- A driver sees only their own allocations; staff see all company ones. -->
     <record id="rule_allocation_driver_self" model="ir.rule">
         <field name="name">Allocation: driver own only</field>

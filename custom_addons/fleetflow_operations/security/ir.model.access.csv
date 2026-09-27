@@ -39,3 +39,7 @@ access_hold_driver,hold driver,model_fleetflow_vehicle_hold,group_ops_driver,1,0
 access_hold_dispatcher,hold dispatcher,model_fleetflow_vehicle_hold,group_ops_dispatcher,1,0,1,0
 access_hold_compliance,hold compliance,model_fleetflow_vehicle_hold,group_ops_compliance,1,0,1,0
 access_hold_manager,hold fleet manager,model_fleetflow_vehicle_hold,group_ops_fleet_manager,1,1,1,1
+access_custody_driver,custody driver,model_fleetflow_custody_event,group_ops_driver,1,0,0,0
+access_custody_dispatcher,custody dispatcher,model_fleetflow_custody_event,group_ops_dispatcher,1,0,0,0
+access_custody_compliance,custody compliance,model_fleetflow_custody_event,group_ops_compliance,1,0,0,0
+access_custody_manager,custody fleet manager,model_fleetflow_custody_event,group_ops_fleet_manager,1,0,0,0

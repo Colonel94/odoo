@@ -23,6 +23,28 @@ CHANNELS = [
     ("other", "Other"),
 ]
 
+# Physical custody / handover (OPS-2A). A reservation is not custody; these
+# vocabularies describe the actual, immutable handover events.
+CUSTODY_EVENT_TYPES = [
+    ("checkout", "Handover out (checkout)"),
+    ("return", "Handover in (return)"),
+]
+ODOMETER_UNITS = [("km", "km"), ("mi", "mi")]
+MI_TO_KM = 1.609344  # exact statute-mile to kilometre factor
+# Structured energy state (one field pair covers fuel OR EV charge as a percent).
+ENERGY_KINDS = [("fuel", "Fuel"), ("ev", "Electric charge")]
+# Structured condition/inspection summary (bounded; not a full inspection module).
+CONDITION_CODES = [
+    ("clean", "Clean"),
+    ("acceptable", "Acceptable"),
+    ("damage_noted", "Damage noted"),
+    ("tyre_issue", "Tyre issue"),
+    ("warning_light", "Warning light"),
+    ("body_damage", "Body damage"),
+    ("interior_issue", "Interior issue"),
+    ("other", "Other"),
+]
+
 # Date precision: never fabricate a day (e.g. 1 January) from a bare year.
 DATE_PRECISION = [
     ("day", "Exact day"),

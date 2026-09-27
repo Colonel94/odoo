@@ -101,6 +101,20 @@ class FleetVehicle(models.Model):
              "first-updater-wins on concurrent confirms).",
     )
 
+    # -- Trusted mileage (OPS-2A) -------------------------------------------
+    # The vehicle's latest ACCEPTED odometer, maintained only by committed custody
+    # events (checkout/return) through _ff_record_odometer. Canonical km is used for
+    # all comparisons; the reported value/unit are retained for display/audit. These
+    # are never editable by a direct write -- a mileage is a captured custody fact.
+    ff_last_odometer_km = fields.Float(
+        string="Latest trusted odometer (km)", readonly=True, copy=False)
+    ff_last_odometer_value = fields.Float(
+        string="Latest odometer (reported)", readonly=True, copy=False)
+    ff_last_odometer_unit = fields.Selection(
+        constants.ODOMETER_UNITS, string="Latest odometer unit", readonly=True, copy=False)
+    ff_custody_event_ids = fields.One2many(
+        "fleetflow.custody.event", "vehicle_id", string="Custody events")
+
     @api.depends("ff_hold_ids.state", "ff_hold_ids.dispatch_blocking")
     def _compute_active_hold_count(self):
         for vehicle in self:
@@ -123,6 +137,9 @@ class FleetVehicle(models.Model):
     _FF_REVIEW_FIELDS = {"ff_operational_state", "ff_authorized_end_of_use",
                          "ff_end_of_use_exempt", "ff_end_of_use_reviewed_by",
                          "ff_end_of_use_reviewed_on"}
+    # Trusted mileage is a captured custody fact, set only by _ff_record_odometer.
+    _FF_CUSTODY_FIELDS = {"ff_last_odometer_km", "ff_last_odometer_value",
+                          "ff_last_odometer_unit"}
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -147,7 +164,30 @@ class FleetVehicle(models.Model):
             raise AccessError(_(
                 "A vehicle's operational review state and authorised end-of-use "
                 "are set by the compliance review actions, not by a direct edit."))
+        if self._FF_CUSTODY_FIELDS & set(vals):
+            raise AccessError(_(
+                "The vehicle's trusted odometer is recorded by custody events "
+                "(checkout/return), not by a direct edit."))
         return super().write(vals)
+
+    def _ff_record_odometer(self, km, value, unit):
+        """Advance the vehicle's trusted odometer from a committed custody event.
+
+        Monotonic: only a reading at or above the current trusted km is recorded
+        (a decrease is refused earlier, at validation). Runs privileged and bypasses
+        the public custody-field guard, because it IS the sanctioned custody path.
+        """
+        if km is None:
+            return
+        for vehicle in self:
+            if vehicle.ff_last_odometer_km and km < vehicle.ff_last_odometer_km:
+                continue
+            super(FleetVehicle, vehicle.sudo()).write({
+                "ff_last_odometer_km": km,
+                "ff_last_odometer_value": value,
+                "ff_last_odometer_unit": unit,
+            })
+        return True
 
     def _require_compliance(self):
         if not (self.env.user.has_group("fleetflow_operations.group_ops_compliance")

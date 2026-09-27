@@ -31,6 +31,9 @@ class FleetflowVehicleHold(models.Model):
     reason = fields.Text(required=True)
     source_work_order_id = fields.Many2one("fleetflow.order", string="Source work order")
     source_allocation_id = fields.Many2one("fleetflow.allocation", string="Source allocation")
+    source_custody_event_id = fields.Many2one(
+        "fleetflow.custody.event", string="Source custody event",
+        help="The immutable return event that reported the defect this hold blocks on.")
     reference = fields.Char(string="External reference")
     dispatch_blocking = fields.Boolean(
         default=True, tracking=True,
@@ -68,7 +71,8 @@ class FleetflowVehicleHold(models.Model):
     # is cleared through the authorized action (with a reason), or a new hold is
     # created. Superuser (fixtures/migration) is exempt.
     _IMMUTABLE = {"vehicle_id", "hold_type", "reason", "dispatch_blocking",
-                  "source_work_order_id", "source_allocation_id", "reference"}
+                  "source_work_order_id", "source_allocation_id",
+                  "source_custody_event_id", "reference"}
 
     @api.model_create_multi
     def create(self, vals_list):

@@ -1,4 +1,5 @@
 from . import constants
+from . import res_company
 from . import ir_attachment
 from . import fleet_vehicle
 from . import driver
@@ -8,4 +9,5 @@ from . import channel_enrolment
 from . import operating_profile
 from . import readiness
 from . import vehicle_hold
+from . import custody_event
 from . import allocation
