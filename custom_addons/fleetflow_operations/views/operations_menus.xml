@@ -20,6 +20,8 @@
               groups="fleetflow_operations.group_ops_compliance,fleetflow_operations.group_ops_fleet_manager"/>
     <menuitem id="menu_ops_holds" name="Holds" parent="menu_ops_root"
               action="action_holds" sequence="6"/>
+    <menuitem id="menu_ops_custody" name="Custody history" parent="menu_ops_root"
+              action="action_custody_events" sequence="7"/>
 
     <!-- Configuration -->
     <menuitem id="menu_ops_config" name="Configuration" parent="menu_ops_root" sequence="9"

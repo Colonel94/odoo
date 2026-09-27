@@ -1,6 +1,6 @@
 {
     "name": "FleetFlow Operations",
-    "version": "16.0.1.2.0",
+    "version": "16.0.1.3.0",
     "category": "Operations/Fleet",
     "summary": "Dubai fleet operations: resource readiness, evidence, allocation and holds.",
     "description": """
@@ -47,6 +47,7 @@ research and source register behind the design.
         "views/operating_profile_views.xml",
         "views/allocation_views.xml",
         "views/vehicle_hold_views.xml",
+        "views/custody_event_views.xml",
         "views/operations_menus.xml",
     ],
     "application": True,

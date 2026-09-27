@@ -25,9 +25,18 @@
                     <field name="state" widget="statusbar" statusbar_visible="draft,confirmed,checked_out,returned"/>
                 </header>
                 <sheet>
+                    <widget name="web_ribbon" title="Overdue" bg_color="bg-danger"
+                            attrs="{'invisible': [('is_overdue', '=', False)]}"/>
                     <div class="oe_title">
                         <h1><field name="name" readonly="1"/></h1>
                     </div>
+                    <div class="alert alert-info" role="status"
+                         attrs="{'invisible': [('is_out', '=', False)]}">
+                        Currently with <field name="current_holder_id" class="oe_inline" readonly="1"/>
+                        since <field name="custody_out_at" class="oe_inline" readonly="1"/>.
+                    </div>
+                    <field name="is_out" invisible="1"/>
+                    <field name="is_overdue" invisible="1"/>
                     <group>
                         <group string="Plan">
                             <field name="operating_mode"/>
@@ -67,16 +76,46 @@
                                     <label for="checkout_odometer"/>
                                     <div><field name="checkout_odometer" class="oe_inline"
                                            attrs="{'readonly': [('state', '!=', 'confirmed')]}"/>
-                                        <field name="odometer_unit" class="oe_inline"/></div>
+                                        <field name="odometer_unit" class="oe_inline"
+                                           attrs="{'readonly': [('state', '!=', 'confirmed')]}"/></div>
+                                    <field name="checkout_condition_code"
+                                           attrs="{'readonly': [('state', '!=', 'confirmed')]}"/>
+                                    <field name="checkout_energy_kind"
+                                           attrs="{'readonly': [('state', '!=', 'confirmed')]}"/>
+                                    <field name="checkout_energy_level"
+                                           attrs="{'readonly': [('state', '!=', 'confirmed')]}"/>
+                                    <field name="checkout_event_id" readonly="1"
+                                           attrs="{'invisible': [('checkout_event_id', '=', False)]}"/>
                                 </group>
                                 <group string="Return">
                                     <field name="custody_in_at" readonly="1"/>
                                     <field name="return_odometer" attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
+                                    <field name="return_condition_code" attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
+                                    <field name="return_energy_kind" attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
+                                    <field name="return_energy_level" attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
                                     <field name="return_fuel" attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
                                     <field name="return_defect" attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
                                     <field name="return_condition" attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
+                                    <field name="distance_travelled_km" readonly="1"
+                                           attrs="{'invisible': [('state', '!=', 'returned')]}"/>
+                                    <field name="return_event_id" readonly="1"
+                                           attrs="{'invisible': [('return_event_id', '=', False)]}"/>
                                 </group>
                             </group>
+                            <separator string="Custody history (immutable)"/>
+                            <field name="custody_event_ids" readonly="1">
+                                <tree create="false" edit="false" delete="false"
+                                      decoration-danger="defect == True">
+                                    <field name="event_time"/>
+                                    <field name="event_type"/>
+                                    <field name="odometer"/>
+                                    <field name="odometer_unit"/>
+                                    <field name="condition"/>
+                                    <field name="defect"/>
+                                    <field name="performed_by"/>
+                                    <field name="hold_id"/>
+                                </tree>
+                            </field>
                         </page>
                         <page string="Decision snapshot">
                             <p class="text-muted">Frozen readiness snapshot recorded at confirmation (audit). Current readiness is checked again at checkout.</p>

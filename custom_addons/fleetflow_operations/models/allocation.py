@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import math
+from datetime import timedelta
 
 from odoo import api, fields, models, _
 from odoo.exceptions import AccessError, UserError, ValidationError
@@ -8,6 +9,7 @@ from odoo.exceptions import AccessError, UserError, ValidationError
 from . import constants
 
 ACTIVE_STATES = ("confirmed", "checked_out")
+_ODO_EPS = 1e-6  # tolerance for float km comparisons (unit conversion)
 
 
 class FleetflowAllocation(models.Model):
@@ -53,13 +55,37 @@ class FleetflowAllocation(models.Model):
     readiness_snapshot = fields.Text(readonly=True, copy=False)
     readiness_version = fields.Char(readonly=True, copy=False)
 
-    # Checkout / return records (captured in-form, consumed by the actions).
+    # Checkout / return capture inputs. These are consumed by the actions to build
+    # the IMMUTABLE custody events (fleetflow.custody.event), which are the source of
+    # truth. They are editable only before their event is recorded and are frozen
+    # afterwards (see write); they are never a second, editable source of truth.
     checkout_odometer = fields.Float(copy=False)
     return_odometer = fields.Float(copy=False)
-    odometer_unit = fields.Selection([("km", "km"), ("mi", "mi")], default="km")
+    odometer_unit = fields.Selection(constants.ODOMETER_UNITS, default="km")
     return_fuel = fields.Char(copy=False)
     return_condition = fields.Text(copy=False)
     return_defect = fields.Boolean(copy=False)
+    # Structured capture (optional): energy state and a condition code per handover.
+    checkout_condition_code = fields.Selection(constants.CONDITION_CODES, copy=False)
+    checkout_energy_kind = fields.Selection(constants.ENERGY_KINDS, copy=False)
+    checkout_energy_level = fields.Integer(copy=False)
+    return_condition_code = fields.Selection(constants.CONDITION_CODES, copy=False)
+    return_energy_kind = fields.Selection(constants.ENERGY_KINDS, copy=False)
+    return_energy_level = fields.Integer(copy=False)
+
+    # Immutable-custody links (source of truth) and derived read-only mirrors.
+    custody_event_ids = fields.One2many(
+        "fleetflow.custody.event", "allocation_id", string="Custody events")
+    checkout_event_id = fields.Many2one(
+        "fleetflow.custody.event", readonly=True, copy=False, string="Checkout event")
+    return_event_id = fields.Many2one(
+        "fleetflow.custody.event", readonly=True, copy=False, string="Return event")
+    current_holder_id = fields.Many2one(
+        "fleetflow.driver", compute="_compute_custody_view", string="Currently with")
+    is_out = fields.Boolean(compute="_compute_custody_view", string="Physically out")
+    is_overdue = fields.Boolean(compute="_compute_custody_view", string="Overdue")
+    distance_travelled_km = fields.Float(
+        compute="_compute_custody_view", string="Distance travelled (km)")
 
     # Amendment inputs (consumed by the guarded Reschedule action, then cleared).
     amend_planned_start = fields.Datetime(copy=False)
@@ -90,7 +116,13 @@ class FleetflowAllocation(models.Model):
     # never by a direct write/import/default context.
     _PROTECTED = {"state", "custody_out_at", "custody_in_at", "confirmed_by",
                   "readiness_status", "readiness_snapshot", "readiness_version",
-                  "warnings_ack_by", "warnings_ack_on"}
+                  "warnings_ack_by", "warnings_ack_on",
+                  "checkout_event_id", "return_event_id"}
+    # Capture inputs that become historical once their handover event is recorded.
+    _CHECKOUT_CAPTURE = {"checkout_odometer", "odometer_unit", "checkout_condition_code",
+                         "checkout_energy_kind", "checkout_energy_level"}
+    _RETURN_CAPTURE = {"return_odometer", "return_fuel", "return_condition", "return_defect",
+                       "return_condition_code", "return_energy_kind", "return_energy_level"}
     # The plan (resources + interval) is locked once the allocation leaves draft;
     # a change then requires the audited amendment path, which re-locks resources
     # and re-evaluates readiness and conflicts.
@@ -102,6 +134,21 @@ class FleetflowAllocation(models.Model):
         for rec in self:
             if rec.planned_start and rec.planned_end and rec.planned_end <= rec.planned_start:
                 raise ValidationError(_("Planned end must be after planned start (half-open interval)."))
+
+    @api.depends("state", "driver_id", "planned_end", "custody_out_at",
+                 "checkout_event_id", "return_event_id")
+    def _compute_custody_view(self):
+        now = fields.Datetime.now()
+        for rec in self:
+            out = rec.state == "checked_out" and bool(rec.custody_out_at) and not rec.custody_in_at
+            rec.is_out = out
+            rec.current_holder_id = rec.driver_id if out else False
+            rec.is_overdue = bool(out and rec.planned_end and now > rec.planned_end)
+            if rec.checkout_event_id and rec.return_event_id:
+                rec.distance_travelled_km = max(
+                    0.0, rec.return_event_id.odometer_km - rec.checkout_event_id.odometer_km)
+            else:
+                rec.distance_travelled_km = 0.0
 
     def write(self, vals):
         # There is NO context flag that opts out of these guards. Protected
@@ -123,6 +170,23 @@ class FleetflowAllocation(models.Model):
                         "Reschedule to amend it (which re-checks readiness and "
                         "conflicts), or cancel and plan a new one."
                     ) % (rec.name, rec.state))
+        # Capture inputs are frozen once their handover has been recorded, so a
+        # checked-out or returned allocation's historical custody facts can never be
+        # rewritten through the form/RPC/import mirror. The immutable custody events
+        # remain the source of truth; these fields only feed them.
+        if self._CHECKOUT_CAPTURE & set(vals):
+            for rec in self:
+                if rec.state in ("checked_out", "returned", "cancelled"):
+                    raise AccessError(_(
+                        "Checkout details for %s were captured at handover and are "
+                        "now historical. Record a custody correction instead."
+                    ) % rec.name)
+        if self._RETURN_CAPTURE & set(vals):
+            for rec in self:
+                if rec.state == "returned":
+                    raise AccessError(_(
+                        "Return details for %s were captured at handover and are now "
+                        "historical. Record a custody correction instead.") % rec.name)
         return super().write(vals)
 
     def unlink(self):
@@ -201,6 +265,27 @@ class FleetflowAllocation(models.Model):
             ("custody_in_at", "=", False),
         ])
 
+    def _custody_conflicts(self, now):
+        """Resources that make taking physical custody NOW unsafe.
+
+        Physical custody would run [now, planned_end); anything an early checkout
+        would trample is a conflict, not just a plan that overlaps the reservation
+        window. Two parts, unioned:
+
+        - an active reservation (confirmed/checked-out) on the same vehicle/driver
+          whose PLANNED window intersects [now, planned_end) -- so an early handover
+          cannot seize a car another current reservation still holds even when the
+          two planned windows do not overlap;
+        - any unreturned physical custody on the resource (a late return blocks the
+          next checkout even after its own window has ended).
+        """
+        self.ensure_one()
+        overlap = self.env["fleetflow.allocation"].search(self._overlapping_domain() + [
+            ("planned_start", "<", self.planned_end),
+            ("planned_end", ">", now),
+        ])
+        return overlap | self._unreturned_custody()
+
     def _requested_channel_products(self):
         self.ensure_one()
         return list({(e.channel, e.product) for e in self.channel_enrolment_ids})
@@ -259,30 +344,46 @@ class FleetflowAllocation(models.Model):
             result["status"], _(" Warnings acknowledged.") if ack_vals else ""))
         return True
 
-    def action_checkout(self, odometer=None, acknowledge=None):
+    def action_checkout(self, odometer=None, unit=None, condition=None, condition_code=None,
+                        energy_kind=None, energy_level=None, notes=None, acknowledge=None):
         self.ensure_one()
         self._require_dispatcher()
         if self.state != "confirmed":
             raise UserError(_("Only a confirmed allocation can be checked out."))
-        # OPS-1 offers rental CAPACITY blocking only; a physical rental handover
+        # OPS-1/2A offer rental CAPACITY blocking only; a physical rental handover
         # needs renter/contract controls that are not part of this increment.
         if self.operating_mode == "rental":
             raise UserError(_(
-                "Physical rental checkout is not available in OPS-1 (rental "
-                "allocations block capacity only)."))
+                "Physical rental checkout is not available yet (rental allocations "
+                "block capacity only)."))
         acknowledge = self.acknowledge_warnings if acknowledge is None else acknowledge
         now = fields.Datetime.now()
-        # Server time is authoritative and the handover must fall inside the
-        # approved reservation window: a handover after planned_end would validate
-        # a window that has already passed -- reschedule instead.
+        # Handover-timing policy (server time is authoritative). A handover after
+        # planned_end validates a window that has already passed -- reschedule. An
+        # early handover is allowed only within the operating company's configured
+        # early tolerance before planned_start; with no tolerance (the conservative
+        # default) checkout before planned_start is refused. This is a FleetFlow
+        # operational rule, not a legal one.
         if now >= self.planned_end:
             raise UserError(_(
                 "The reservation window ended at %s (server time). Reschedule the "
                 "allocation before checking out.") % self.planned_end)
+        tolerance = self.company_id.ff_checkout_early_tolerance_minutes or 0
+        earliest = self.planned_start - timedelta(minutes=tolerance)
+        if now < earliest:
+            raise UserError(_(
+                "Too early to hand over: checkout opens at %s (planned start %s, "
+                "early-handover tolerance %s min). Handover before then is not "
+                "allowed.") % (earliest, self.planned_start, tolerance))
+        # A checkout odometer is mandatory and validated (0 is a value, not 'unset').
+        odometer = self.checkout_odometer if odometer is None else odometer
+        unit = unit or self.odometer_unit or "km"
+        if odometer is None:
+            raise UserError(_("A checkout odometer reading is required."))
         self._lock_resources()
         # Fresh readiness over the ACTUAL handover window [now, planned_end], not
-        # the planned start: a document expired by now blocks, and evidence not
-        # yet effective cannot be relied on for an early handover.
+        # the planned start: a document expired by now blocks, and evidence not yet
+        # effective cannot be relied on for an early handover.
         result = self._evaluate(start=now, end=self.planned_end)
         if not result["can_confirm"]:
             raise UserError(_("Readiness changed; cannot check out:\n- %s")
@@ -293,43 +394,75 @@ class FleetflowAllocation(models.Model):
             ("dispatch_blocking", "=", True)])
         if blocking:
             raise UserError(_("Vehicle has an active dispatch-blocking hold."))
-        conflicts = self._overlapping_conflicts() | self._unreturned_custody()
+        # Physical custody starts NOW, so the conflict horizon is [now, planned_end)
+        # -- not merely the planned window. This catches a resource occupied between
+        # now and this allocation's plan (an early checkout must not seize a car
+        # another current reservation still holds) and any unreturned custody.
+        conflicts = self._custody_conflicts(now)
         if conflicts:
-            raise UserError(_("Cannot check out: resource busy or not returned (%s).")
-                            % ", ".join(conflicts.mapped("name")))
+            raise UserError(_("Cannot check out: the vehicle or driver is busy or "
+                              "not yet returned (%s).") % ", ".join(conflicts.mapped("name")))
+        km = self._validate_odometer(odometer, unit)
         ack_vals = self._require_ack(result, acknowledge)
-        vals = {"state": "checked_out", "custody_out_at": now, **ack_vals}
-        odometer = self.checkout_odometer if odometer is None else odometer
-        if odometer:
-            self._validate_odometer(odometer)
-            vals["checkout_odometer"] = odometer
-        self._apply(vals)
-        self.message_post(body=_("Checked out.%s") % (
-            _(" Warnings acknowledged.") if ack_vals else ""))
+        event = self._create_custody_event(
+            "checkout", now, odometer, unit, km, condition=condition,
+            condition_code=condition_code, energy_kind=energy_kind,
+            energy_level=energy_level, notes=notes, defect=False)
+        self.vehicle_id._ff_record_odometer(km, odometer, unit)
+        self._apply({
+            "state": "checked_out", "custody_out_at": now, "checkout_event_id": event.id,
+            "checkout_odometer": odometer, "odometer_unit": unit,
+            "checkout_condition_code": condition_code or self.checkout_condition_code,
+            "checkout_energy_kind": energy_kind or self.checkout_energy_kind,
+            "checkout_energy_level": energy_level if energy_level is not None else self.checkout_energy_level,
+            **ack_vals})
+        self.message_post(body=_("Checked out (odometer %s %s).%s") % (
+            odometer, unit, _(" Warnings acknowledged.") if ack_vals else ""))
         return True
 
-    def action_return(self, odometer=None, fuel=None, condition=None, defect=None):
+    def action_return(self, odometer=None, unit=None, fuel=None, condition=None, defect=None,
+                      condition_code=None, energy_kind=None, energy_level=None, notes=None):
         self.ensure_one()
         self._require_dispatcher()
         if self.state != "checked_out":
             raise UserError(_("Only a checked-out allocation can be returned."))
         self._lock_resources()
-        # Fall back to the in-form values when called from a button.
+        # An open checkout custody must exist -- a return is the close of a real
+        # handover, never a standalone edit.
+        if not self.checkout_event_id or self.return_event_id:
+            raise UserError(_("No open checkout custody to return against."))
+        # Fall back to the in-form capture values when called from a button.
         odometer = self.return_odometer if odometer is None else odometer
+        unit = unit or self.odometer_unit or "km"
         fuel = self.return_fuel if fuel is None else fuel
         condition = self.return_condition if condition is None else condition
         defect = self.return_defect if defect is None else bool(defect)
-        vals = {"state": "returned", "custody_in_at": fields.Datetime.now(),
-                "return_fuel": fuel, "return_condition": condition, "return_defect": defect}
-        # Validate whenever a reading is present (including 0), so a zero return
-        # cannot bypass the decreasing-reading check.
-        if odometer is not None:
-            self._validate_odometer(odometer, is_return=True)
-            vals["return_odometer"] = odometer
-        self._apply(vals)
+        condition_code = condition_code or self.return_condition_code
+        energy_kind = energy_kind or self.return_energy_kind
+        energy_level = self.return_energy_level if energy_level is None else energy_level
+        if odometer is None:
+            raise UserError(_("A return odometer reading is required."))
+        # Validate the reading (including 0) against checkout and the vehicle's last
+        # accepted km; a zero/decrease cannot slip past.
+        km = self._validate_odometer(odometer, unit, is_return=True)
+        now = fields.Datetime.now()
+        event = self._create_custody_event(
+            "return", now, odometer, unit, km, condition=condition,
+            condition_code=condition_code, energy_kind=energy_kind,
+            energy_level=energy_level, notes=notes, fuel=fuel, defect=defect)
+        self.vehicle_id._ff_record_odometer(km, odometer, unit)
+        # A safety-relevant defect originates a blocking hold + work order FROM the
+        # immutable return event, preserving provenance to the reported defect.
         if defect:
-            self._raise_defect_hold(condition)
-        self.message_post(body=_("Returned.%s") % (_(" Defect reported.") if defect else ""))
+            self._raise_defect_hold(event, condition or notes)
+        self._apply({
+            "state": "returned", "custody_in_at": now, "return_event_id": event.id,
+            "return_odometer": odometer, "odometer_unit": unit, "return_fuel": fuel,
+            "return_condition": condition, "return_defect": defect,
+            "return_condition_code": condition_code, "return_energy_kind": energy_kind,
+            "return_energy_level": energy_level})
+        self.message_post(body=_("Returned (odometer %s %s).%s") % (
+            odometer, unit, _(" Defect reported.") if defect else ""))
         return True
 
     def action_cancel(self):
@@ -456,62 +589,86 @@ class FleetflowAllocation(models.Model):
             },
         }
 
-    def _validate_odometer(self, value, is_return=False):
+    @staticmethod
+    def _normalize_km(value, unit):
+        """Canonical kilometres for comparison; 100 mi is never compared with 100 km."""
+        if value is None:
+            return None
+        return value * constants.MI_TO_KM if unit == "mi" else float(value)
+
+    def _validate_odometer(self, value, unit, is_return=False):
+        """Validate a reported reading and return its canonical km.
+
+        Rejects non-finite, negative and decreasing readings. Comparison is done in
+        canonical km against the vehicle's latest trusted km (which the previous
+        checkout already advanced), so mixed km/mi never compare directly and a
+        return below checkout is caught through the same floor.
+        """
         self.ensure_one()
         if value is None:
-            return
+            raise ValidationError(_("An odometer reading is required."))
         if math.isnan(value) or math.isinf(value):
             raise ValidationError(_("Odometer reading must be a finite number."))
         if value < 0:
             raise ValidationError(_("Odometer reading must be non-negative."))
-        if is_return and self.checkout_odometer and value < self.checkout_odometer:
-            # A decrease needs a reviewed correction/meter-change path, not silent
-            # acceptance (a zero return no longer slips past this).
+        km = self._normalize_km(value, unit)
+        floor = self.vehicle_id.ff_last_odometer_km or 0.0
+        if km < floor - _ODO_EPS:
             raise ValidationError(_(
-                "Return odometer (%s) is below checkout (%s). A decrease requires "
-                "a reviewed meter-change correction.") % (value, self.checkout_odometer))
-        # Reconcile against the last accepted reading for this vehicle across
-        # allocations (same unit); the meter cannot go backwards between custodies.
-        last = self._last_accepted_odometer()
-        if last is not None and value < last:
-            raise ValidationError(_(
-                "Odometer reading (%s %s) is below the last accepted reading (%s) "
-                "for this vehicle. A decrease requires a reviewed meter-change "
-                "correction.") % (value, self.odometer_unit, last))
+                "Odometer reading (%s %s = %.3f km) is below the vehicle's last "
+                "accepted reading (%.3f km). A decrease requires a reviewed "
+                "meter-change correction.") % (value, unit, km, floor))
+        # Belt-and-braces for the return: never below its own checkout event.
+        if is_return and self.checkout_event_id:
+            out_km = self.checkout_event_id.odometer_km or 0.0
+            if km < out_km - _ODO_EPS:
+                raise ValidationError(_(
+                    "Return odometer (%.3f km) is below checkout (%.3f km). A "
+                    "decrease requires a reviewed meter-change correction.") % (km, out_km))
+        return km
 
-    def _last_accepted_odometer(self):
-        """Highest accepted reading recorded for this vehicle on other allocations
-        in the same unit (returns are preferred, then checkouts)."""
-        self.ensure_one()
-        others = self.search([
-            ("vehicle_id", "=", self.vehicle_id.id), ("id", "!=", self.id),
-            ("odometer_unit", "=", self.odometer_unit)])
-        readings = [r for r in (others.mapped("return_odometer")
-                                + others.mapped("checkout_odometer")) if r]
-        return max(readings) if readings else None
+    def _create_custody_event(self, event_type, when, odometer, unit, km, condition=None,
+                              condition_code=None, energy_kind=None, energy_level=None,
+                              notes=None, fuel=None, defect=False):
+        """Create the immutable custody event that IS the record of this handover.
 
-    def _raise_defect_hold(self, note):
-        """A serious reported defect creates a linked chain: this allocation ->
-        the defect -> a work order -> a specific safety hold, so the operator can
-        follow custody through to repair and clearance."""
+        Created privileged (there is no public create right on custody events); the
+        event stamps its own authoritative time and actor. A free-text `condition`
+        note is preserved; the structured `condition_code` defaults sensibly.
+        """
         self.ensure_one()
-        # Create the work order first, then the hold that references it, so the
-        # source-to-repair-to-clearance chain is complete and attributable.
+        code = condition_code or ("damage_noted" if defect else "acceptable")
+        return self.env["fleetflow.custody.event"].sudo().create({
+            "allocation_id": self.id, "vehicle_id": self.vehicle_id.id,
+            "driver_id": self.driver_id.id or False, "company_id": self.company_id.id,
+            "event_type": event_type, "event_time": when,
+            "odometer": odometer, "odometer_unit": unit, "odometer_km": km,
+            "energy_kind": energy_kind or False,
+            "energy_level": energy_level if energy_level is not None else False,
+            "fuel_note": fuel or False, "condition": code, "defect": bool(defect),
+            "notes": notes or condition or False,
+        })
+
+    def _raise_defect_hold(self, event, note):
+        """A serious reported defect creates a linked chain from the IMMUTABLE return
+        event: allocation -> return event -> work order -> specific safety hold, so
+        the operator can follow custody through to repair and clearance. The hold and
+        order retain the exact originating custody event as their provenance."""
+        self.ensure_one()
         order = self.env["fleetflow.order"].sudo().create({
             "title": _("Defect reported on return: %s") % self.name,
             "description": note or "",
-            "vehicle_id": self._fleetflow_order_vehicle(),
+            "vehicle_id": self.vehicle_id.id,
             "company_id": self.company_id.id,
             "priority": "3",
         })
-        self.env["fleetflow.vehicle.hold"].sudo().create({
+        hold = self.env["fleetflow.vehicle.hold"].sudo().create({
             "vehicle_id": self.vehicle_id.id, "hold_type": "safety",
             "reason": _("Defect reported on return of %s: %s") % (self.name, note or _("(no note)")),
             "dispatch_blocking": True,
             "source_work_order_id": order.id,
             "source_allocation_id": self.id,
+            "source_custody_event_id": event.id,
         })
-
-    def _fleetflow_order_vehicle(self):
-        """fleetflow.order requires a fleet.vehicle; reuse this allocation's vehicle."""
-        return self.vehicle_id.id
+        event.sudo()._apply({"hold_id": hold.id, "order_id": order.id})
+        return hold
