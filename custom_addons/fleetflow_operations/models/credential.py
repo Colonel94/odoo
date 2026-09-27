@@ -538,6 +538,37 @@ class FleetflowCredential(models.Model):
                     "document kind of the evidence it replaces, so it cannot be "
                     "approved as its renewal. Create an independent credential "
                     "instead.") % rec.name)
+        # Lock every predecessor and detect a competing winner BEFORE any state is
+        # written, so a losing sibling approval leaves NO partial business change
+        # (no verified state, verification attribution, replacement link or
+        # attachment mutation). The winner slot is the predecessor's
+        # superseded_by_id link, judged on the actual relationship -- not merely the
+        # predecessor's current state: an earlier successor may since have been
+        # revoked without clearing the link, and the predecessor must never silently
+        # gain a second successor. Locking the predecessor rows FOR UPDATE serialises
+        # two reviewers approving competing successors concurrently: the second
+        # either reads the recorded winner and is refused here, or fails to serialise
+        # and is refused on retry. Exactly one accepted successor can ever result --
+        # even when the predecessor was already revoked before either approval, the
+        # case that previously slipped through because the link was recorded only for
+        # a still-verified predecessor.
+        predecessors = self.mapped("supersedes_id")
+        for pid in sorted(predecessors.ids):
+            self.env.cr.execute(
+                "SELECT id FROM fleetflow_credential WHERE id = %s FOR UPDATE", (pid,))
+        predecessors.invalidate_recordset(["state", "superseded_by_id"])
+        claimed = {}  # predecessor id -> the successor claiming its winner slot now
+        for rec in self:
+            predecessor = rec.supersedes_id
+            if not predecessor:
+                continue
+            winner = predecessor.superseded_by_id or claimed.get(predecessor.id)
+            if winner and winner != rec:
+                raise UserError(_(
+                    "Evidence %s has already been replaced by another approved "
+                    "renewal. Resolve the conflicting replacement chain before "
+                    "approving this one.") % predecessor.name)
+            claimed[predecessor.id] = rec
         # Re-validate the source file against its CURRENT bytes immediately before
         # verifying, under a row lock, THEN bump the source-lock counter so the
         # approval is a committed write on that row. This closes two gaps: a file
@@ -554,41 +585,30 @@ class FleetflowCredential(models.Model):
             if rec.attachment_id:
                 rec.attachment_id.invalidate_recordset(["raw", "datas"])
                 rec._validate_evidence_file(rec.attachment_id.sudo())
+        # Every guard has passed: record the verified state and its attribution.
         self._apply({
             "state": "verified", "verified_by": self.env.uid, "verified_on": now,
             "ever_verified": True,
         })
         constants.bump_attachment_source_locks(self.env, att_ids)
-        # A verified renewal takes over from the document it supersedes -- but only
-        # the RELATIONSHIP + attribution are recorded here; coverage is then decided
-        # per requested interval by effective dates (see _effective_interval). The
-        # predecessor row is locked FOR UPDATE first so two reviewers approving
-        # competing successors concurrently cannot both win: the second sees the
-        # predecessor already replaced (or fails to serialise and retries), and one
-        # unambiguous chain results. A predecessor that is no longer verified (e.g.
-        # revoked in the meantime) is never resurrected.
+        # Record the winning replacement relationship on each predecessor (its row
+        # is already locked above). Only the RELATIONSHIP + attribution are recorded
+        # here; coverage is then decided per requested interval by effective dates
+        # (see _effective_interval). A still-verified predecessor is also moved to
+        # 'superseded' with its effective cutover. A predecessor that is no longer
+        # verified (revoked before this approval) is NOT resurrected: it keeps its
+        # rejected state and its revocation attribution and grants no coverage, but
+        # it durably records this one accepted successor -- so a competing sibling can
+        # never also be approved, and revoking either record later neither erases the
+        # winner nor reopens an alternative sibling approval.
         for rec in self:
             predecessor = rec.supersedes_id
             if not predecessor:
                 continue
-            self.env.cr.execute(
-                "SELECT id FROM fleetflow_credential WHERE id = %s FOR UPDATE",
-                (predecessor.id,))
-            predecessor.invalidate_recordset(["state", "superseded_by_id"])
-            # A single unambiguous approved replacement: if the predecessor is
-            # already linked to a DIFFERENT successor it cannot be replaced again --
-            # judged on the actual relationship link, not merely the current state
-            # (an earlier successor may since have been revoked without clearing the
-            # link, and the predecessor must not silently gain a second successor).
-            if (predecessor.superseded_by_id
-                    and predecessor.superseded_by_id != rec):
-                raise UserError(_(
-                    "Evidence %s has already been replaced by another approved "
-                    "renewal. Resolve the conflicting replacement chain before "
-                    "approving this one.") % predecessor.name)
+            pred_vals = {"superseded_by_id": rec.id}
             if predecessor.state == "verified":
-                predecessor._apply({"state": "superseded", "superseded_by_id": rec.id,
-                                    "replaced_on": now})
+                pred_vals.update({"state": "superseded", "replaced_on": now})
+            predecessor._apply(pred_vals)
         self._bump_subject_locks()
         return True
 
@@ -699,6 +719,18 @@ class FleetflowCredential(models.Model):
         """
         self.ensure_one()
         if self.state not in ("verified", "superseded"):
+            return (None, None, False)
+        # An inconsistent linked chain: this record links to a predecessor whose
+        # compliance identity (operating company, subject type, exact subject and
+        # document kind) it does not share. Its provenance is unreliable, so it
+        # grants NO trusted coverage and is surfaced for review -- detected on the
+        # successor ITSELF here, not only when following the predecessor's forward
+        # replacement link (see _cutover), so the same inconsistent record cannot
+        # satisfy its own subject's document check as a single record. A
+        # same-identity renewal of a revoked predecessor is unaffected (case B), and
+        # an independent credential with no supersedes link is evaluated normally
+        # (case C).
+        if self.supersedes_id and not self._same_identity(self.supersedes_id):
             return (None, None, False)
         if self.date_precision in ("year", "month", "unknown"):
             return (None, None, False)
