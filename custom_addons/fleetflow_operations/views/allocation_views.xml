@@ -84,12 +84,18 @@
                                            attrs="{'readonly': [('state', '!=', 'confirmed')]}"/>
                                     <field name="checkout_energy_level"
                                            attrs="{'readonly': [('state', '!=', 'confirmed')]}"/>
+                                    <field name="checkout_notes"
+                                           attrs="{'readonly': [('state', '!=', 'confirmed')]}"/>
                                     <field name="checkout_event_id" readonly="1"
                                            attrs="{'invisible': [('checkout_event_id', '=', False)]}"/>
                                 </group>
                                 <group string="Return">
                                     <field name="custody_in_at" readonly="1"/>
-                                    <field name="return_odometer" attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
+                                    <label for="return_odometer"/>
+                                    <div><field name="return_odometer" class="oe_inline"
+                                           attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
+                                        <field name="return_odometer_unit" class="oe_inline"
+                                           attrs="{'readonly': [('state', '!=', 'checked_out')]}"/></div>
                                     <field name="return_condition_code" attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
                                     <field name="return_energy_kind" attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
                                     <field name="return_energy_level" attrs="{'readonly': [('state', '!=', 'checked_out')]}"/>
