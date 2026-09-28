@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="profile_tree" model="ir.ui.view">
+        <field name="name">fleetflow.operating.profile.tree</field>
+        <field name="model">fleetflow.operating.profile</field>
+        <field name="arch" type="xml">
+            <tree decoration-success="state == 'published'" decoration-muted="state == 'archived'">
+                <field name="name"/>
+                <field name="operating_mode"/>
+                <field name="channel"/>
+                <field name="product"/>
+                <field name="version"/>
+                <field name="state" widget="badge"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="profile_form" model="ir.ui.view">
+        <field name="name">fleetflow.operating.profile.form</field>
+        <field name="model">fleetflow.operating.profile</field>
+        <field name="arch" type="xml">
+            <form string="Operating profile">
+                <header>
+                    <button name="action_publish" type="object" string="Publish" class="oe_highlight"
+                            groups="fleetflow_operations.group_ops_compliance"
+                            attrs="{'invisible': [('state', '=', 'published')]}"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <div class="oe_title"><h1><field name="name"/></h1></div>
+                    <group>
+                        <group string="Applies to">
+                            <field name="operating_mode"/>
+                            <field name="channel"/>
+                            <field name="product"/>
+                            <field name="version"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                        </group>
+                        <group string="Provenance">
+                            <field name="source_ref"/>
+                            <field name="source_version"/>
+                            <field name="channel_freshness_days"/>
+                        </group>
+                    </group>
+                    <group string="Required checks (finite, no expressions)">
+                        <group>
+                            <field name="require_operating_authorization"/>
+                            <field name="require_vehicle_registration"/>
+                            <field name="require_insurance"/>
+                            <field name="require_inspection"/>
+                            <field name="require_tracking_cert"/>
+                        </group>
+                        <group>
+                            <field name="require_driver_licence"/>
+                            <field name="require_professional_permit"/>
+                            <field name="require_channel_approval"/>
+                            <field name="require_category_evidence"/>
+                            <field name="enforce_end_of_use"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_profiles" model="ir.actions.act_window">
+        <field name="name">Operating profiles</field>
+        <field name="res_model">fleetflow.operating.profile</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="authorization_form" model="ir.ui.view">
+        <field name="name">fleetflow.operating.authorization.form</field>
+        <field name="model">fleetflow.operating.authorization</field>
+        <field name="arch" type="xml">
+            <form string="Operating permit">
+                <header>
+                    <button name="action_submit" type="object" string="Submit"
+                            attrs="{'invisible': [('state', '!=', 'draft')]}"/>
+                    <button name="action_verify" type="object" string="Verify" class="oe_highlight"
+                            groups="fleetflow_operations.group_ops_compliance"
+                            attrs="{'invisible': [('state', 'not in', ['draft', 'pending'])]}"/>
+                    <button name="action_reject" type="object" string="Reject"
+                            groups="fleetflow_operations.group_ops_compliance"
+                            attrs="{'invisible': [('state', 'not in', ['draft', 'pending'])]}"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <div class="oe_title"><h1><field name="name"/></h1></div>
+                    <group>
+                        <group>
+                            <field name="operating_mode"/>
+                            <field name="activity"/>
+                            <field name="jurisdiction"/>
+                            <field name="company_id" groups="base.group_multi_company"/>
+                        </group>
+                        <group>
+                            <field name="date_start"/>
+                            <field name="date_end"/>
+                            <field name="evidence_id"/>
+                            <field name="verified_by" readonly="1"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_authorizations" model="ir.actions.act_window">
+        <field name="name">Operating permits</field>
+        <field name="res_model">fleetflow.operating.authorization</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+</odoo>

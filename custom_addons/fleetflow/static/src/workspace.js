@@ -39,13 +39,15 @@ export class FleetFlowWorkspace extends Component {
     }
 
     openOrders(filter = 'open') {
+        // Use server-computed cutoffs (reference_time / released_since) so the
+        // drill-through matches the server-side metric counts. Never derive the
+        // cutoff from the browser clock, which can be skewed.
+        const data = this.state.data || {};
         let domain = [['stage', 'not in', ['done', 'cancelled']]];
-        const now = new Date();
-        const toServer = (value) => value.toISOString().slice(0, 19).replace('T', ' ');
         if (filter === 'overdue') {
-            domain.push(['due_at', '<', toServer(now)]);
+            domain.push(['due_at', '<', data.reference_time]);
         } else if (filter === 'released') {
-            domain = [['stage', '=', 'done'], ['released_at', '>=', toServer(new Date(now.getTime() - 7 * 86400000))]];
+            domain = [['stage', '=', 'done'], ['released_at', '>=', data.released_since]];
         } else if (filter !== 'open') {
             domain = [['stage', '=', filter]];
         }

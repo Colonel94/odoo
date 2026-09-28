@@ -249,4 +249,9 @@ class FleetFlowOrder(models.Model):
             'stages': stages, 'orders': rows,
             'can_create': self._has_role('dispatcher'),
             'can_manage': self._has_role('manager'),
+            # Server-computed cutoffs so dashboard drill-through domains match the
+            # counts above regardless of the browser clock. A skewed client time
+            # must not change which records a metric opens.
+            'reference_time': fields.Datetime.to_string(now),
+            'released_since': fields.Datetime.to_string(now - timedelta(days=7)),
         }

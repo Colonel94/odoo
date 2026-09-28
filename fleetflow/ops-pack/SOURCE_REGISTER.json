@@ -1,0 +1,180 @@
+[
+  {
+    "id": "S01",
+    "publisher": "RTA",
+    "title": "Car Rental activity description card",
+    "url": "https://www.rta.ae/wps/wcm/connect/rta/c89901f3-cc12-4223-a601-0b09ba16bd33/Car-Rental-en.pdf?MOD=AJPERES",
+    "location": "Pages 1–3; activity scope, operating conditions, replacement and registration controls",
+    "source_date": "Not shown in the document inspected",
+    "evidence": "All three pages read, including rendered screenshots.",
+    "limitation": "Public undated activity card, not a complete consolidated legal opinion. English wording and category/date applicability need operator/RTA confirmation.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S02",
+    "publisher": "RTA",
+    "title": "NOC for a New Trade Licence — activity setup and TARS/Takamul FAQs",
+    "url": "https://www.rta.ae/wps/portal/rta/ae/home/rta-services/service-details?serviceId=496",
+    "location": "FAQs 1, 2 and 7",
+    "source_date": "Page update: 2026-06-04",
+    "evidence": "Full relevant service text inspected.",
+    "limitation": "Confirm the issued permit conditions and current portal terms; the page does not establish platform acceptance.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S03",
+    "publisher": "RTA",
+    "title": "Request or Renew a Professional Driver Permit — Taxi or Luxury Vehicle Driver",
+    "url": "https://www.rta.ae/wps/portal/rta/ae/home/rta-services/service-details?serviceId=629",
+    "location": "Output; new/renewal steps; Important to Know; Service Requirements; FAQs",
+    "source_date": "Search result page update: 2026-08-07",
+    "evidence": "Relevant service text inspected, including FAQ limiting service to the registered company.",
+    "limitation": "Taxi/luxury permit category only. Not the separate tourist, bus or delivery category. Obtain current employer/permit evidence and review exceptional cases.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S04",
+    "publisher": "Uber",
+    "title": "Driver requirements in the UAE",
+    "url": "https://www.uber.com/ae/en/drive/requirements/",
+    "location": "Dubai driver documentation and matching employer details",
+    "source_date": "Undated public page",
+    "evidence": "Public requirements inspected.",
+    "limitation": "Do not import Abu Dhabi or Sharjah rules into Dubai; platform confirmation for each driver remains necessary.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S05",
+    "publisher": "Uber",
+    "title": "Vehicle requirements in the UAE",
+    "url": "https://www.uber.com/ae/en/drive/requirements/vehicle-requirements/",
+    "location": "Dubai expatriates; registered city; product-specific vehicle eligibility",
+    "source_date": "Undated public page",
+    "evidence": "Relevant sections inspected.",
+    "limitation": "Requirements can change; accepted-model/category lists and operator approval matter. The Abu Dhabi five-year wording is NOT a general Dubai cutoff.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S06",
+    "publisher": "RTA",
+    "title": "Register a New Vehicle — corporate / luxury vehicle process",
+    "url": "https://www.rta.ae/wps/portal/rta/ae/home/rta-services/service-details?serviceId=519",
+    "location": "Corporate and luxury-vehicle registration process, franchise prerequisites, insurance and inspection",
+    "source_date": "Page update: 2026-09-03",
+    "evidence": "Relevant service text inspected.",
+    "limitation": "Activity-specific prerequisites differ. The term extended vehicle can mean stretched bodywork, not a lifespan extension.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S07",
+    "publisher": "RTA",
+    "title": "Renew Vehicle Ownership — corporate",
+    "url": "https://www.rta.ae/wps/portal/rta/ae/home/rta-services/service-details?serviceId=586",
+    "location": "Renewal process; FAQ on Technical Inspection Certificate validity",
+    "source_date": "Undated in excerpt used",
+    "evidence": "Service text and 30-day certificate-validity FAQ inspected.",
+    "limitation": "Certificate validity for a renewal transaction is not the same as the vehicle registration expiry or next inspection due date.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S08",
+    "publisher": "RTA",
+    "title": "Lifespan Extension for Commercial Vehicles",
+    "url": "https://rta.ae/wps/portal/rta/ae/home/rta-services/service-details?serviceId=589",
+    "location": "Steps and Important to Know",
+    "source_date": "Undated in excerpt used",
+    "evidence": "Service text inspected.",
+    "limitation": "Generic code-5/four-year wording must be reconciled with differentiated category rules in S01. No blanket extension should be granted by software.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S09",
+    "publisher": "SIRA",
+    "title": "Secure Path",
+    "url": "https://www.sira.gov.ae/en/more/security%20partners%20servicres/secure-path",
+    "location": "Service overview",
+    "source_date": "Undated public page",
+    "evidence": "Official service overview inspected.",
+    "limitation": "A FleetFlow map or third-party GPS device is not proof of the required approved tracking installation.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S10",
+    "publisher": "Government of Dubai Media Office / RTA",
+    "title": "RTA launches online Transportation Activities Rental System",
+    "url": "https://mediaoffice.ae/en/news/2021/October/30-10/RTA-launches-online-Transportation-Activities-Rental-System",
+    "location": "Rental contract digitisation and system launch",
+    "source_date": "2021-10-30",
+    "evidence": "Official historical announcement inspected.",
+    "limitation": "Historical process context, not proof of present API access. Current activity/activation evidence is S01/S02.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S11",
+    "publisher": "RTA",
+    "title": "Introducing Takamul permit to enhance integration between luxury transport and car rental sectors",
+    "url": "https://www.rta.ae/wps/portal/rta/ae/home/news-and-media/all-news/NewsDetails/introducing-takamul-permit-to-enhance-integration-between-luxury-transport-and-car-rental-sectors",
+    "location": "Temporary collaboration and common-member requirement",
+    "source_date": "2025-03-07",
+    "evidence": "Official announcement inspected.",
+    "limitation": "Use current S02 and the actual issued permit for operative dates, not an inferred rolling monthly permission.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S12",
+    "publisher": "Careem",
+    "title": "Become a Captain",
+    "url": "https://www.careem.com/en-AE/captains/",
+    "location": "Onboarding overview and general document list",
+    "source_date": "Undated public page",
+    "evidence": "Official public overview inspected.",
+    "limitation": "Does not establish a complete Dubai limousine fleet checklist or an accessible fleet integration API. Confirm city/product-specific terms with the operator and Careem.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S13",
+    "publisher": "Uber Developers",
+    "title": "Supplier Platform introduction and getting started",
+    "url": "https://developer.uber.com/docs/vehicles/introduction",
+    "additional_url": "https://developer.uber.com/docs/vehicles/getting-started",
+    "location": "High-level supplier integration capabilities and onboarding",
+    "source_date": "Undated public developer pages",
+    "evidence": "High-level public documentation inspected; no credentials or operational access provided.",
+    "limitation": "Pages warn the design is under development and contain access/confidentiality notices. No endpoint specifications reproduced here; do not assume the customer has production scopes or Dubai access.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S14",
+    "publisher": "Salik",
+    "title": "Variable Toll Rates",
+    "url": "https://www.salik.ae/en/Toll-Gates/variable-toll-rates",
+    "location": "Official rate-page search result",
+    "source_date": "Current search result; full page not retrieved",
+    "evidence": "Official-domain search result located; direct fetch returned 403.",
+    "limitation": "Use as a pointer only. No tax or exact price is implemented from a snippet. Import official transaction amounts and verify current tariff/tax treatment separately.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S15",
+    "publisher": "GitHub / project repository",
+    "title": "Current FleetFlow branch and code",
+    "url": "https://github.com/Colonel94/odoo/tree/59bfb037ffa2c3b51f96c2f665029c1e7dab44d0",
+    "additional_url": "https://api.github.com/repos/Colonel94/odoo/branches?per_page=100",
+    "location": "Feature branch; custom_addons/fleetflow; fleetflow deployment and tenant documents",
+    "source_date": "Branch rechecked: 2026-09-21",
+    "evidence": "Connected GitHub read confirmed the feature branch remains at the reviewed SHA.",
+    "limitation": "Current task did not rerun Odoo or CI. Prior detailed source/CI review remains the baseline; recheck before implementing.",
+    "retrieved_on": "2026-09-21"
+  },
+  {
+    "id": "S16",
+    "publisher": "Prior FleetFlow review supplied in this conversation",
+    "title": "GitHub review and Claude prompt",
+    "url": "https://github.com/Colonel94/odoo/pull/1",
+    "location": "Companion file fleetflow-github-review-and-claude-prompt.md; findings R1–R6",
+    "source_date": "2026-09-21",
+    "evidence": "Companion review read in this task. It records inspection of Actions run 35634246140, job 106447619504 and 14 passing tests.",
+    "limitation": "Historical execution evidence, not a new runtime test. Preserve fixes, test gaps and unresolved baseline decision.",
+    "retrieved_on": "2026-09-21"
+  }
+]

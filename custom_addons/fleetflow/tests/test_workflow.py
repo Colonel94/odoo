@@ -213,3 +213,27 @@ class TestFleetFlow(TransactionCase):
         self.vehicle.active = False
         with self.assertRaises(ValidationError), self.cr.savepoint():
             self.new_order()
+
+    def test_workspace_data_exposes_server_cutoffs(self):
+        # Regression (O1.09): the dashboard must drill through on server-computed
+        # cutoffs, not the browser clock. get_workspace_data therefore returns
+        # reference_time and released_since as server datetime strings, and the
+        # overdue metric is consistent with an explicit reference_time domain.
+        overdue = self.new_order(
+            scheduled_at=fields.Datetime.now() - timedelta(days=2),
+            due_at=fields.Datetime.now() - timedelta(days=1),
+        )
+        data = self.Order.with_user(self.manager).get_workspace_data()
+        self.assertIn('reference_time', data)
+        self.assertIn('released_since', data)
+        ref = fields.Datetime.to_datetime(data['reference_time'])
+        since = fields.Datetime.to_datetime(data['released_since'])
+        self.assertTrue(ref and since and since < ref)
+        # The overdue count matches an open-order domain evaluated at the server
+        # reference_time the client is told to use.
+        server_overdue = self.Order.with_user(self.manager).search_count([
+            ('stage', 'not in', ['done', 'cancelled']),
+            ('due_at', '<', data['reference_time']),
+        ])
+        self.assertEqual(data['overdue'], server_overdue)
+        self.assertIn(overdue.id, [row['id'] for row in data['orders']])

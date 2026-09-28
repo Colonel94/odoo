@@ -64,13 +64,22 @@ def shell_task(config_path, mode):
         elif mode == 'users':
             from seed_users import seed as seed_users
             seed_users(env)
+        elif mode == 'ops':
+            from seed_ops import seed as seed_ops
+            seed_ops(env)
+        elif mode == 'drill':
+            # Disposable migration-drill hook: run the script named by FF_DRILL in
+            # a SUPERUSER env (see fleetflow/migrate_drill/). Local dev only.
+            script = os.environ.get(
+                'FF_DRILL', '/workspace/fleetflow/migrate_drill/seed_migration.py')
+            exec(open(script).read(), {'env': env, 'odoo': odoo, '__name__': '__drill__'})
         cursor.commit()
 
 
 def main():
     path = configure()
     args = sys.argv[1:]
-    if args and args[0] in ('bootstrap', 'demo', 'users'):
+    if args and args[0] in ('bootstrap', 'demo', 'users', 'ops', 'drill'):
         shell_task(path, args[0])
     else:
         # Run the image's Odoo console script (coherent core + bundled addons).

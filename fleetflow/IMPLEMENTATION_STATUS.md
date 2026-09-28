@@ -9,18 +9,34 @@
 - Checked JavaScript syntax with Node.
 - Rendered a clearly labelled sample-data design preview, using the workspace template and styles, in Chromium at 1440 px and 390 px. Neither layout produced document-level horizontal overflow.
 
-## Not verified
+## Verified in local runtime (22 September 2026)
 
-- Odoo module installation and upgrade.
-- PostgreSQL-backed workflow/security behaviour and all 14 supplied integration tests.
-- Actual Owl compilation and interaction inside the Odoo web client.
-- Live Odoo browser acceptance, concurrent requests, backups/restores, load and production security.
-- GitHub Actions execution. The workflow is supplied as source, not an observed passing run.
+Executed locally against the `odoo:16.0` image (`16.0-20250909`) + PostgreSQL 15:
 
-The runtime setup attempt could not download the framework/dependencies or PostgreSQL. The standalone design preview is not a running Odoo instance and contains fictional data.
+- Module **installs** (`manage.py init`); `fleetflow` state = installed.
+- **14/14 integration tests pass** (`manage.py test`, separate `fleetflow-test` project).
+- Owl workspace **compiles and renders** in a real browser (Playwright/Chromium),
+  login verified, at 1440 px and 390 px, with **zero console/page/network errors**
+  and correct server-side role filtering (technician view scoped, no create/Reports).
+
+A deployment-layer compatibility fix was required and applied: the image ships a
+newer 16.0 than the checkout, so `entrypoint.py` runs the image's coherent core
+(`addons_path = image core + custom_addons`) rather than the old `/workspace/odoo-bin`.
+Core Odoo is unmodified. See `entrypoint.py` header and `NEXT_REVIEW.md`.
+
+## Still not verified
+
+- Multi-tenant hosting (TEN-01…06) — the build is single-tenant; TEN-06 is Blocked.
+- Multi-connection concurrency for competing transitions (single-connection covered).
+- Backup/restore, upgrade/rollback, performance at scale, production security.
+- GitHub Actions run — verify the actual run, not the presence of the workflow file.
+
+The standalone design preview is not a running Odoo instance and contains fictional data.
 
 ## GitHub delivery state
 
-The branch `feat/fleetflow-workflow-platform` was successfully created from the existing Odoo 16.0 baseline. The connector then blocked the code-upload request. No implementation commit or PR was created. The source is delivered in the archive, not in the remote branch.
+The FleetFlow addon + deployment are committed and **pushed** to
+`feat/fleetflow-workflow-platform`, with **draft PR #1** open for review. Core Odoo
+is unchanged. OPS-1 (Dubai operations) work continues on `feat/fleetflow-ops1`.
 
 Do not represent static validation or a preview screenshot as end-to-end application verification.

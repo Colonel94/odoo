@@ -1,0 +1,32 @@
+# Disposable old->new migration drill. The web workspace is swapped between the
+# baseline (1.1.0) and the new (1.2.0) trees via ${FF_WS}, sharing ONE db volume.
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: ${FLEETFLOW_POSTGRES_PASSWORD:?set}
+      FLEETFLOW_DB_PASSWORD: ${FLEETFLOW_DB_PASSWORD:?set}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ${FF_WS}/fleetflow/init-db.sh:/docker-entrypoint-initdb.d/fleetflow.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d fleetflow"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  web:
+    image: odoo:16.0
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["python3", "/workspace/fleetflow/entrypoint.py"]
+    environment:
+      FLEETFLOW_DB_PASSWORD: ${FLEETFLOW_DB_PASSWORD:?set}
+      FLEETFLOW_MASTER_PASSWORD: ${FLEETFLOW_MASTER_PASSWORD:?set}
+      FLEETFLOW_ADMIN_PASSWORD: ${FLEETFLOW_ADMIN_PASSWORD:?set}
+    volumes:
+      - ${FF_WS}:/workspace:ro
+      - odoo-data:/var/lib/odoo
+volumes:
+  db-data:
+  odoo-data:

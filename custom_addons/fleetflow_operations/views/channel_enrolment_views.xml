@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="channel_tree" model="ir.ui.view">
+        <field name="name">fleetflow.channel.enrolment.tree</field>
+        <field name="model">fleetflow.channel.enrolment</field>
+        <field name="arch" type="xml">
+            <tree editable="bottom" decoration-success="state == 'approved'"
+                  decoration-danger="state in ['suspended', 'rejected']">
+                <field name="company_id" invisible="1"/>
+                <field name="channel"/>
+                <field name="product"/>
+                <field name="city"/>
+                <field name="vehicle_id"/>
+                <field name="driver_id"/>
+                <field name="external_id"/>
+                <field name="state"/>
+                <field name="verified_as_of"/>
+                <field name="recheck_date"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="channel_form" model="ir.ui.view">
+        <field name="name">fleetflow.channel.enrolment.form</field>
+        <field name="model">fleetflow.channel.enrolment</field>
+        <field name="arch" type="xml">
+            <form string="Channel enrolment">
+                <header>
+                    <button name="action_approve" type="object" string="Approve" class="oe_highlight"
+                            attrs="{'invisible': [('state', '=', 'approved')]}"/>
+                    <button name="action_suspend" type="object" string="Suspend"
+                            attrs="{'invisible': [('state', '=', 'suspended')]}"/>
+                    <field name="state" widget="statusbar"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="channel"/>
+                            <field name="product"/>
+                            <field name="city"/>
+                            <field name="external_id"/>
+                        </group>
+                        <group>
+                            <field name="vehicle_id"/>
+                            <field name="driver_id"/>
+                            <field name="verified_as_of"/>
+                            <field name="recheck_date"/>
+                            <field name="company_id" invisible="1"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_channels" model="ir.actions.act_window">
+        <field name="name">Channels</field>
+        <field name="res_model">fleetflow.channel.enrolment</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+</odoo>

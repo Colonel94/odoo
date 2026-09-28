@@ -1,12 +1,31 @@
-"""Explicit, idempotent fictional data for local UI exploration; no new login users."""
+"""Explicit, idempotent fictional data for local UI exploration; no new login users.
+
+Safety (see OPS-1 O1.09): refuses to run on a database that already holds real
+(non-demo) work orders unless FLEETFLOW_ALLOW_DEMO is set, so it cannot pollute
+an operational database. Every record it creates is clearly marked fictional.
+"""
+import os
 from datetime import timedelta
 from odoo import fields
+
+# Marker every demo work order carries (kept in sync with seed_users.py).
+DEMO_MARKER = 'FICTIONAL DEMO ONLY'
 
 
 def seed(env):
     params = env['ir.config_parameter']
     if params.get_param('fleetflow.demo_seeded'):
         print('Demo data already exists; no duplicate records added.')
+        return
+    real_orders = env['fleetflow.order'].search_count(
+        [('description', 'not like', DEMO_MARKER + '%')]
+    )
+    if real_orders and not os.environ.get('FLEETFLOW_ALLOW_DEMO'):
+        print(
+            'Refusing to seed demo data: %d real (non-demo) work order(s) present. '
+            'Run only against a disposable database, or set FLEETFLOW_ALLOW_DEMO=1 '
+            'to force.' % real_orders
+        )
         return
     admin = env.ref('base.user_admin')
     company = admin.company_id
