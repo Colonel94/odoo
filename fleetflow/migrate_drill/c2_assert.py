@@ -55,6 +55,16 @@ assert hold.source_work_order_id.id == d["returned_defect"]["hold_work_order"], 
 v_ret = env["fleet.vehicle"].browse(d["returned"]["vehicle"])
 assert v_ret.ff_last_odometer_km >= d["returned"]["return_odometer"], "trusted mileage not seeded"
 
+# --- 6) 1.4.0 backfill: a miles return keeps its unit (not relabelled as km) -
+mi = Alloc.browse(d["mi"]["id"])
+assert d["mi"]["unit"] == "mi", "seed sanity: expected a miles allocation"
+assert mi.odometer_unit == "mi", "checkout unit changed"
+assert mi.return_odometer_unit == "mi", "return_odometer_unit not backfilled from odometer_unit"
+mi_ret = events(mi.id, "return")
+assert mi_ret.odometer_unit == "mi", "legacy return event unit not preserved"
+# Canonical km derived from miles (200 mi ~ 321.87 km), so distance is unit-correct.
+assert abs(mi_ret.odometer_km - 200 * 1.609344) < 1e-3, "canonical km not derived from miles"
+
 print("C2_ASSERT_OK legacy custody events reconstructed (times preserved, actor unknown, "
       "is_legacy set); allocation states/mileage/defect/hold links preserved; vehicle "
       "trusted mileage seeded")

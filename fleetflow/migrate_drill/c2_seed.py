@@ -90,6 +90,15 @@ a_def.action_return(odometer=9120, defect=True, condition="warning light")
 
 hold = env["fleetflow.vehicle.hold"].search([("source_allocation_id", "=", a_def.id)], limit=1)
 
+# 5) RETURNED recorded in MILES (old code had a single shared odometer_unit). The
+#    1.4.0 migration must backfill the new return_odometer_unit from it, so the
+#    historical miles reading is not relabelled as kilometres.
+v5, d5 = car("C2-MI"), driver("c2 d5", "C2-D5")
+a_mi = make(v5, d5, -1, 8)
+a_mi.write({"odometer_unit": "mi"})
+a_mi.action_checkout(odometer=100)
+a_mi.action_return(odometer=200)
+
 data = {
     "confirmed": {"id": a_conf.id, "state": a_conf.state, "vehicle": v1.id},
     "checked_out": {"id": a_out.id, "state": a_out.state, "vehicle": v2.id,
@@ -103,6 +112,8 @@ data = {
                         "return_defect": a_def.return_defect,
                         "hold": hold.id, "hold_state": hold.state, "hold_type": hold.hold_type,
                         "hold_work_order": hold.source_work_order_id.id},
+    "mi": {"id": a_mi.id, "vehicle": v5.id, "unit": a_mi.odometer_unit,
+           "checkout_odometer": a_mi.checkout_odometer, "return_odometer": a_mi.return_odometer},
 }
 with open("/var/lib/odoo/c2_seed.json", "w") as fh:
     fh.write(json.dumps(data))
