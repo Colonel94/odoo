@@ -61,14 +61,20 @@ class FleetflowAllocation(models.Model):
     # afterwards (see write); they are never a second, editable source of truth.
     checkout_odometer = fields.Float(copy=False)
     return_odometer = fields.Float(copy=False)
-    odometer_unit = fields.Selection(constants.ODOMETER_UNITS, default="km")
+    # The CHECKOUT reported unit (return has its own return_odometer_unit).
+    odometer_unit = fields.Selection(constants.ODOMETER_UNITS, default="km",
+                                     string="Checkout unit")
     return_fuel = fields.Char(copy=False)
     return_condition = fields.Text(copy=False)
     return_defect = fields.Boolean(copy=False)
     # Structured capture (optional): energy state and a condition code per handover.
+    # Checkout and return each carry their OWN reported reading AND unit, so a return
+    # in km never relabels a checkout that was recorded in miles.
     checkout_condition_code = fields.Selection(constants.CONDITION_CODES, copy=False)
     checkout_energy_kind = fields.Selection(constants.ENERGY_KINDS, copy=False)
     checkout_energy_level = fields.Integer(copy=False)
+    checkout_notes = fields.Text(copy=False)
+    return_odometer_unit = fields.Selection(constants.ODOMETER_UNITS, default="km", copy=False)
     return_condition_code = fields.Selection(constants.CONDITION_CODES, copy=False)
     return_energy_kind = fields.Selection(constants.ENERGY_KINDS, copy=False)
     return_energy_level = fields.Integer(copy=False)
@@ -120,9 +126,10 @@ class FleetflowAllocation(models.Model):
                   "checkout_event_id", "return_event_id"}
     # Capture inputs that become historical once their handover event is recorded.
     _CHECKOUT_CAPTURE = {"checkout_odometer", "odometer_unit", "checkout_condition_code",
-                         "checkout_energy_kind", "checkout_energy_level"}
-    _RETURN_CAPTURE = {"return_odometer", "return_fuel", "return_condition", "return_defect",
-                       "return_condition_code", "return_energy_kind", "return_energy_level"}
+                         "checkout_energy_kind", "checkout_energy_level", "checkout_notes"}
+    _RETURN_CAPTURE = {"return_odometer", "return_odometer_unit", "return_fuel",
+                       "return_condition", "return_defect", "return_condition_code",
+                       "return_energy_kind", "return_energy_level"}
     # The plan (resources + interval) is locked once the allocation leaves draft;
     # a change then requires the audited amendment path, which re-locks resources
     # and re-evaluates readiness and conflicts.
@@ -145,8 +152,11 @@ class FleetflowAllocation(models.Model):
             rec.current_holder_id = rec.driver_id if out else False
             rec.is_overdue = bool(out and rec.planned_end and now > rec.planned_end)
             if rec.checkout_event_id and rec.return_event_id:
-                rec.distance_travelled_km = max(
-                    0.0, rec.return_event_id.odometer_km - rec.checkout_event_id.odometer_km)
+                # Use the EFFECTIVE (accepted-tip) readings so an approved correction
+                # is reflected in the journey distance.
+                out_km = rec.checkout_event_id._effective_tip().odometer_km or 0.0
+                in_km = rec.return_event_id._effective_tip().odometer_km or 0.0
+                rec.distance_travelled_km = max(0.0, in_km - out_km)
             else:
                 rec.distance_travelled_km = 0.0
 
@@ -375,9 +385,27 @@ class FleetflowAllocation(models.Model):
                 "Too early to hand over: checkout opens at %s (planned start %s, "
                 "early-handover tolerance %s min). Handover before then is not "
                 "allowed.") % (earliest, self.planned_start, tolerance))
-        # A checkout odometer is mandatory and validated (0 is a value, not 'unset').
+        # Resolve EVERY captured input ONCE: explicit argument when supplied, else the
+        # saved form value. The immutable event and the allocation mirrors are then
+        # built from the SAME payload, so history and display cannot disagree.
         odometer = self.checkout_odometer if odometer is None else odometer
         unit = unit or self.odometer_unit or "km"
+        condition_code = condition_code if condition_code is not None else self.checkout_condition_code
+        energy_kind = energy_kind if energy_kind is not None else self.checkout_energy_kind
+        energy_level = self.checkout_energy_level if energy_level is None else energy_level
+        notes = notes if notes is not None else self.checkout_notes
+        # Energy is 'recorded' only when a kind is set; a measured 0% is then kept and
+        # 'not recorded' (no kind) stores no level -- 0 and omission stay distinct.
+        energy_level = energy_level if energy_kind else False
+        # A safety-coded condition means the car is NOT fit to hand over: refuse the
+        # handover (raise a hold through the proper path) rather than persist a hold in
+        # a transaction that a later validation error would roll back.
+        if condition_code in constants.SAFETY_CONDITION_CODES:
+            raise UserError(_(
+                "A safety condition (%s) was recorded for checkout; the vehicle cannot "
+                "be handed over. Record a hold and resolve it first.")
+                % dict(constants.CONDITION_CODES).get(condition_code, condition_code))
+        # A checkout odometer is mandatory and validated (0 is a value, not 'unset').
         if odometer is None:
             raise UserError(_("A checkout odometer reading is required."))
         self._lock_resources()
@@ -404,6 +432,8 @@ class FleetflowAllocation(models.Model):
                               "not yet returned (%s).") % ", ".join(conflicts.mapped("name")))
         km = self._validate_odometer(odometer, unit)
         ack_vals = self._require_ack(result, acknowledge)
+        # Event and mirrors from the SAME resolved payload (`condition` free-text is
+        # carried via notes; the structured code is the resolved condition_code).
         event = self._create_custody_event(
             "checkout", now, odometer, unit, km, condition=condition,
             condition_code=condition_code, energy_kind=energy_kind,
@@ -412,9 +442,10 @@ class FleetflowAllocation(models.Model):
         self._apply({
             "state": "checked_out", "custody_out_at": now, "checkout_event_id": event.id,
             "checkout_odometer": odometer, "odometer_unit": unit,
-            "checkout_condition_code": condition_code or self.checkout_condition_code,
-            "checkout_energy_kind": energy_kind or self.checkout_energy_kind,
-            "checkout_energy_level": energy_level if energy_level is not None else self.checkout_energy_level,
+            "checkout_condition_code": condition_code,
+            "checkout_energy_kind": energy_kind,
+            "checkout_energy_level": energy_level or 0,
+            "checkout_notes": notes,
             **ack_vals})
         self.message_post(body=_("Checked out (odometer %s %s).%s") % (
             odometer, unit, _(" Warnings acknowledged.") if ack_vals else ""))
@@ -431,15 +462,17 @@ class FleetflowAllocation(models.Model):
         # handover, never a standalone edit.
         if not self.checkout_event_id or self.return_event_id:
             raise UserError(_("No open checkout custody to return against."))
-        # Fall back to the in-form capture values when called from a button.
+        # Resolve each input ONCE from its own saved form value (the return has its own
+        # reported unit, distinct from the checkout unit). Preserve explicit zero.
         odometer = self.return_odometer if odometer is None else odometer
-        unit = unit or self.odometer_unit or "km"
+        unit = unit or self.return_odometer_unit or "km"
         fuel = self.return_fuel if fuel is None else fuel
         condition = self.return_condition if condition is None else condition
         defect = self.return_defect if defect is None else bool(defect)
-        condition_code = condition_code or self.return_condition_code
-        energy_kind = energy_kind or self.return_energy_kind
+        condition_code = condition_code if condition_code is not None else self.return_condition_code
+        energy_kind = energy_kind if energy_kind is not None else self.return_energy_kind
         energy_level = self.return_energy_level if energy_level is None else energy_level
+        energy_level = energy_level if energy_kind else False
         if odometer is None:
             raise UserError(_("A return odometer reading is required."))
         # Validate the reading (including 0) against checkout and the vehicle's last
@@ -451,18 +484,21 @@ class FleetflowAllocation(models.Model):
             condition_code=condition_code, energy_kind=energy_kind,
             energy_level=energy_level, notes=notes, fuel=fuel, defect=defect)
         self.vehicle_id._ff_record_odometer(km, odometer, unit)
-        # A safety-relevant defect originates a blocking hold + work order FROM the
-        # immutable return event, preserving provenance to the reported defect.
-        if defect:
-            self._raise_defect_hold(event, condition or notes)
+        # A car is ALWAYS recorded as returned even when damaged; a safety-coded
+        # condition OR an explicit defect atomically raises the dispatch-blocking
+        # follow-up FROM the immutable return event (custody still closes below). A
+        # safety condition cannot be cancelled by leaving the defect box unticked.
+        if defect or (condition_code in constants.SAFETY_CONDITION_CODES):
+            event._raise_safety_followup(reason=condition or notes)
         self._apply({
             "state": "returned", "custody_in_at": now, "return_event_id": event.id,
-            "return_odometer": odometer, "odometer_unit": unit, "return_fuel": fuel,
+            "return_odometer": odometer, "return_odometer_unit": unit, "return_fuel": fuel,
             "return_condition": condition, "return_defect": defect,
             "return_condition_code": condition_code, "return_energy_kind": energy_kind,
-            "return_energy_level": energy_level})
+            "return_energy_level": energy_level or 0})
         self.message_post(body=_("Returned (odometer %s %s).%s") % (
-            odometer, unit, _(" Defect reported.") if defect else ""))
+            odometer, unit, _(" Safety follow-up raised.") if (
+                defect or condition_code in constants.SAFETY_CONDITION_CODES) else ""))
         return True
 
     def action_cancel(self):
@@ -649,26 +685,3 @@ class FleetflowAllocation(models.Model):
             "notes": notes or condition or False,
         })
 
-    def _raise_defect_hold(self, event, note):
-        """A serious reported defect creates a linked chain from the IMMUTABLE return
-        event: allocation -> return event -> work order -> specific safety hold, so
-        the operator can follow custody through to repair and clearance. The hold and
-        order retain the exact originating custody event as their provenance."""
-        self.ensure_one()
-        order = self.env["fleetflow.order"].sudo().create({
-            "title": _("Defect reported on return: %s") % self.name,
-            "description": note or "",
-            "vehicle_id": self.vehicle_id.id,
-            "company_id": self.company_id.id,
-            "priority": "3",
-        })
-        hold = self.env["fleetflow.vehicle.hold"].sudo().create({
-            "vehicle_id": self.vehicle_id.id, "hold_type": "safety",
-            "reason": _("Defect reported on return of %s: %s") % (self.name, note or _("(no note)")),
-            "dispatch_blocking": True,
-            "source_work_order_id": order.id,
-            "source_allocation_id": self.id,
-            "source_custody_event_id": event.id,
-        })
-        event.sudo()._apply({"hold_id": hold.id, "order_id": order.id})
-        return hold

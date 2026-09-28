@@ -44,6 +44,13 @@ CONDITION_CODES = [
     ("interior_issue", "Interior issue"),
     ("other", "Other"),
 ]
+# FleetFlow INTERNAL operating policy (NOT an RTA/legal rule): condition codes that
+# denote a roadworthiness concern and must raise a dispatch-blocking safety review,
+# regardless of whether a separate defect checkbox was ticked. Cosmetic observations
+# (interior_issue, a generic "damage_noted", clean/acceptable/other) are deliberately
+# NOT auto-blocking; a reviewer flags them explicitly if needed. Safety
+# classification is never guessed from free-text notes.
+SAFETY_CONDITION_CODES = frozenset({"tyre_issue", "warning_light", "body_damage"})
 
 # Date precision: never fabricate a day (e.g. 1 January) from a bare year.
 DATE_PRECISION = [

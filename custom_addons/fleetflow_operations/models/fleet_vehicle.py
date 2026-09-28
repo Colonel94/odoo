@@ -189,6 +189,25 @@ class FleetVehicle(models.Model):
             })
         return True
 
+    def _ff_recompute_trusted_odometer(self):
+        """Recompute trusted mileage from the EFFECTIVE (accepted-tip) reading of each
+        physical custody event, after a correction changed one. Uses the highest
+        effective reading in canonical km -- corrections that would contradict a later
+        accepted reading are rejected upstream, so this never drops below a genuine
+        later movement. Runs privileged, bypassing the public custody-field guard."""
+        for vehicle in self:
+            roots = vehicle.ff_custody_event_ids.filtered(lambda e: not e.corrects_id)
+            tips = [r._effective_tip() for r in roots]
+            if not tips:
+                continue
+            best = max(tips, key=lambda e: e.odometer_km or 0.0)
+            super(FleetVehicle, vehicle.sudo()).write({
+                "ff_last_odometer_km": best.odometer_km or 0.0,
+                "ff_last_odometer_value": best.odometer,
+                "ff_last_odometer_unit": best.odometer_unit,
+            })
+        return True
+
     def _require_compliance(self):
         if not (self.env.user.has_group("fleetflow_operations.group_ops_compliance")
                 or self.env.su):
