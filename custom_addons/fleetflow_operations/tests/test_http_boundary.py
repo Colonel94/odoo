@@ -634,6 +634,93 @@ class TestHttpBoundary(HttpCase):
                          ["checkout", "return"])
         self.assertEqual(alloc.distance_travelled_km, 150.0)
 
+    def _cust_setup(self, tag):
+        """A reviewed vehicle/driver with verified evidence and approved enrolments,
+        returned as (vehicle, driver, enrolment ids)."""
+        env = self.env
+        veh = env["fleet.vehicle"].sudo().create({
+            "model_id": self.vehicle.model_id.id, "license_plate": "HTTP-%s" % tag,
+            "company_id": self.company.id, "ff_operator_company_id": self.company.id,
+            "ff_operational_state": "reviewed"})
+        drv = env["fleetflow.driver"].sudo().create({
+            "name": "http %s drv" % tag, "employee_ref": "HTTP-%s-D" % tag,
+            "company_id": self.company.id})
+        for kind, field, subj in (("vehicle_registration", "vehicle_id", veh),
+                                  ("insurance", "vehicle_id", veh),
+                                  ("driver_licence", "driver_id", drv)):
+            env["fleetflow.credential"].sudo().create({
+                "name": "%s-%s" % (kind, tag), "doc_kind": kind, "company_id": self.company.id,
+                field: subj.id, "date_start": date.today() - timedelta(days=10),
+                "date_end": date.today() + timedelta(days=365)}).action_verify()
+        enr_ids = []
+        for field, subj in (("vehicle_id", veh), ("driver_id", drv)):
+            e = env["fleetflow.channel.enrolment"].sudo().create({
+                "company_id": self.company.id, "channel": "uber", "product": "UberX",
+                "city": "Dubai", field: subj.id})
+            e.action_approve()
+            enr_ids.append(e.id)
+        return veh, drv, enr_ids
+
+    def _cust_alloc(self, veh, drv, enr_ids):
+        now = datetime.utcnow()
+        return self._assert_ok(self._rpc("fleetflow.allocation", "create", [{
+            "operating_mode": "chauffeur", "city": "Dubai", "vehicle_id": veh.id,
+            "driver_id": drv.id,
+            "planned_start": (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
+            "planned_end": (now + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S"),
+            "channel_enrolment_ids": [(6, 0, enr_ids)]}]))
+
+    def test_B22_effective_correction_over_rpc(self):
+        """F04 over the API: a fleet-manager correction changes effective mileage and
+        the next checkout's validation, without altering original history."""
+        veh, drv, enr = self._cust_setup("C22")
+        self.authenticate("http.disp", PW)
+        aid = self._cust_alloc(veh, drv, enr)
+        self._assert_ok(self._rpc("fleetflow.allocation", "action_confirm", [[aid]]))
+        self._assert_ok(self._rpc("fleetflow.allocation", "action_checkout", [[aid]], {"odometer": 100}))
+        self._assert_ok(self._rpc("fleetflow.allocation", "action_return", [[aid]], {"odometer": 200}))
+        ev_id = self.env["fleetflow.allocation"].browse(aid).return_event_id.id
+        # Dispatcher may NOT correct (F10).
+        self._assert_denied(self._rpc("fleetflow.custody.event", "action_correct",
+                                      [[ev_id], "nope"], {"odometer": 250}))
+        # Fleet manager may.
+        self.authenticate("http.mgr", PW)
+        self._assert_ok(self._rpc("fleetflow.custody.event", "action_correct",
+                                  [[ev_id], "meter mis-read"], {"odometer": 250}))
+        ev = self.env["fleetflow.custody.event"].browse(ev_id)
+        ev.invalidate_recordset()
+        veh.invalidate_recordset()
+        self.assertEqual(ev.odometer, 200.0)                 # original unchanged
+        self.assertEqual(ev._effective_tip().odometer, 250.0)
+        self.assertEqual(veh.ff_last_odometer_km, 250.0)
+        # Next checkout at 210 refused; at 260 proceeds.
+        self.authenticate("http.disp", PW)
+        bid = self._cust_alloc(veh, drv, enr)
+        self._assert_ok(self._rpc("fleetflow.allocation", "action_confirm", [[bid]]))
+        self._assert_denied(self._rpc("fleetflow.allocation", "action_checkout", [[bid]], {"odometer": 210}))
+        self._assert_ok(self._rpc("fleetflow.allocation", "action_checkout", [[bid]], {"odometer": 260}))
+
+    def test_B23_form_values_flow_into_checkout_over_rpc(self):
+        """F01/F02 over the API: values SAVED on the allocation form flow into the
+        immutable event on a no-argument Check out."""
+        veh, drv, enr = self._cust_setup("C23")
+        self.authenticate("http.disp", PW)
+        aid = self._cust_alloc(veh, drv, enr)
+        self._assert_ok(self._rpc("fleetflow.allocation", "action_confirm", [[aid]]))
+        # Save the capture fields via the form (write), then Check out with NO args.
+        self._assert_ok(self._rpc("fleetflow.allocation", "write", [[aid], {
+            "checkout_odometer": 777, "checkout_condition_code": "acceptable",
+            "checkout_energy_kind": "ev", "checkout_energy_level": 0,
+            "checkout_notes": "handover ok"}]))
+        self._assert_ok(self._rpc("fleetflow.allocation", "action_checkout", [[aid]]))
+        ev = self.env["fleetflow.allocation"].browse(aid).checkout_event_id
+        ev.invalidate_recordset()
+        self.assertEqual(ev.odometer, 777.0)
+        self.assertEqual(ev.condition, "acceptable")
+        self.assertEqual(ev.energy_kind, "ev")
+        self.assertEqual(ev.energy_level, 0)      # measured 0%, preserved (not dropped)
+        self.assertEqual(ev.notes, "handover ok")
+
     def test_B20_inconsistent_successor_needs_review_over_rpc(self):
         """R2 over the authenticated API: an inconsistent legacy chain (successor
         redirected to a different vehicle) must not supply trusted coverage. The

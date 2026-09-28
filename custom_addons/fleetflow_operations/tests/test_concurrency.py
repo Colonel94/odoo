@@ -641,6 +641,143 @@ class TestConcurrency(TransactionCase):
         finally:
             self._cleanup_r1(reg, ids)
 
+    # ==================================================================
+    # F09 (OPS-2A corrections): concurrent corrections and correction-vs-
+    # checkout serialise on the shared vehicle lock -- exactly one wins, the
+    # other aborts cleanly (serialization/retry) or is refused, and the final
+    # state is one consistent outcome.
+    # ==================================================================
+    def _seed_returned_for_correction(self, reg, suffix):
+        """Commit a RETURNED allocation (checkout 100 km, return 200 km), a fleet
+        manager who may correct it, and a second CONFIRMED allocation on the same
+        vehicle ready to check out. Returns the committed ids."""
+        with reg.cursor() as cr:
+            env = api.Environment(cr, SUPERUSER_ID, {})
+            company = env.company
+            dispatcher = env["res.users"].with_context(no_reset_password=True).create({
+                "name": "corr %s disp" % suffix, "login": "ff.corr.%s.disp" % suffix,
+                "email": "ff.corr.%s.disp@example.com" % suffix,
+                "company_id": company.id, "company_ids": [(6, 0, company.ids)],
+                "groups_id": [(6, 0, [env.ref("fleetflow_operations.group_ops_dispatcher").id])]})
+            manager = env["res.users"].with_context(no_reset_password=True).create({
+                "name": "corr %s mgr" % suffix, "login": "ff.corr.%s.mgr" % suffix,
+                "email": "ff.corr.%s.mgr@example.com" % suffix,
+                "company_id": company.id, "company_ids": [(6, 0, company.ids)],
+                "groups_id": [(6, 0, [env.ref("fleetflow_operations.group_ops_fleet_manager").id])]})
+            brand = env["fleet.vehicle.model.brand"].create({"name": "corr %s brand" % suffix})
+            model = env["fleet.vehicle.model"].create({"name": "corr %s model" % suffix, "brand_id": brand.id})
+            vehicle = env["fleet.vehicle"].create({
+                "model_id": model.id, "license_plate": "CORR-%s" % suffix, "company_id": company.id,
+                "ff_operator_company_id": company.id, "ff_operational_state": "reviewed"})
+            driver = env["fleetflow.driver"].create({
+                "name": "corr %s driver" % suffix, "employee_ref": "CORR-%s-D" % suffix,
+                "company_id": company.id})
+            profile = env["fleetflow.operating.profile"].create({
+                "name": "corr %s chauffeur" % suffix, "company_id": company.id,
+                "operating_mode": "chauffeur",
+                "require_operating_authorization": False, "require_vehicle_registration": True,
+                "require_insurance": True, "require_driver_licence": True,
+                "require_professional_permit": False, "require_channel_approval": False,
+                "enforce_end_of_use": False})
+            profile.action_publish()
+            for kind, field, subj in (("vehicle_registration", "vehicle_id", vehicle),
+                                      ("insurance", "vehicle_id", vehicle),
+                                      ("driver_licence", "driver_id", driver)):
+                env["fleetflow.credential"].create({
+                    "name": "%s-%s" % (kind, suffix), "doc_kind": kind, "company_id": company.id,
+                    field: subj.id, "date_start": date.today() - timedelta(days=10),
+                    "date_end": date.today() + timedelta(days=365)}).action_verify()
+            now = datetime.utcnow()
+            a = env["fleetflow.allocation"].create({
+                "company_id": company.id, "operating_mode": "chauffeur", "vehicle_id": vehicle.id,
+                "driver_id": driver.id, "planned_start": now - timedelta(hours=1),
+                "planned_end": now + timedelta(hours=8)})
+            a.action_confirm()
+            a.action_checkout(odometer=100)
+            a.action_return(odometer=200)
+            b = env["fleetflow.allocation"].create({
+                "company_id": company.id, "operating_mode": "chauffeur", "vehicle_id": vehicle.id,
+                "driver_id": driver.id, "planned_start": now - timedelta(hours=1),
+                "planned_end": now + timedelta(hours=8)})
+            b.action_confirm()
+            ids = {"alloc": a.id, "alloc_b": b.id, "vehicle": vehicle.id, "driver": driver.id,
+                   "dispatcher": dispatcher.id, "manager": manager.id, "profile": profile.id,
+                   "return_event": a.return_event_id.id}
+            cr.commit()
+        return ids
+
+    def test_concurrent_corrections_one_wins(self):
+        reg = registry(self.env.cr.dbname)
+        ids = self._seed_returned_for_correction(reg, "twin")
+        try:
+            def correct(km):
+                def work(env):
+                    env["fleetflow.custody.event"].browse(ids["return_event"]).action_correct(
+                        "concurrent fix", odometer=km)
+                return work
+            results = self._race(reg, (ids["manager"], correct(250)), (ids["manager"], correct(300)))
+            self.assertEqual(len(results), 2, "both threads must finish: %s" % results)
+            self.assertEqual(list(results.values()).count("ok"), 1,
+                             "exactly one correction may win: %s" % results)
+            self.assertIn([v for v in results.values() if v != "ok"][0],
+                          ("serialization", "UserError"),
+                          "the loser must abort or be refused: %s" % results)
+            with reg.cursor() as cr:
+                env = api.Environment(cr, SUPERUSER_ID, {})
+                orig = env["fleetflow.custody.event"].browse(ids["return_event"])
+                self.assertEqual(orig.odometer, 200.0, "original must be unchanged")
+                self.assertEqual(len(orig.corrected_by_ids), 1, "exactly one accepted correction")
+                tip = orig._effective_tip()
+                self.assertIn(tip.odometer, (250.0, 300.0))
+                self.assertEqual(env["fleet.vehicle"].browse(ids["vehicle"]).ff_last_odometer_km,
+                                 tip.odometer)
+        finally:
+            self._cleanup_correction(reg, ids)
+
+    def test_correction_vs_checkout_serialise(self):
+        reg = registry(self.env.cr.dbname)
+        ids = self._seed_returned_for_correction(reg, "cvc")
+        try:
+            def correct(env):
+                env["fleetflow.custody.event"].browse(ids["return_event"]).action_correct(
+                    "raise floor", odometer=250)
+
+            def checkout(env):
+                env["fleetflow.allocation"].browse(ids["alloc_b"]).action_checkout(odometer=210)
+            results = self._race(reg, (ids["manager"], correct), (ids["dispatcher"], checkout))
+            self.assertEqual(len(results), 2, "both threads must finish: %s" % results)
+            self.assertEqual(list(results.values()).count("ok"), 1,
+                             "correction and checkout must not both win: %s" % results)
+            with reg.cursor() as cr:
+                env = api.Environment(cr, SUPERUSER_ID, {})
+                b = env["fleetflow.allocation"].browse(ids["alloc_b"])
+                orig = env["fleetflow.custody.event"].browse(ids["return_event"])
+                floor = env["fleet.vehicle"].browse(ids["vehicle"]).ff_last_odometer_km
+                if results["a"] == "ok":     # correction won
+                    self.assertEqual(orig._effective_tip().odometer, 250.0)
+                    self.assertEqual(floor, 250.0)
+                    self.assertEqual(b.state, "confirmed")   # checkout refused/aborted
+                else:                         # checkout won
+                    self.assertEqual(b.state, "checked_out")
+                    self.assertEqual(orig._effective_tip().odometer, 200.0)
+                    self.assertEqual(floor, 210.0)
+        finally:
+            self._cleanup_correction(reg, ids)
+
+    def _cleanup_correction(self, reg, ids):
+        with reg.cursor() as cr:
+            env = api.Environment(cr, SUPERUSER_ID, {})
+            env["fleetflow.vehicle.hold"].search([("vehicle_id", "=", ids["vehicle"])]).unlink()
+            env["fleetflow.custody.event"].search([("vehicle_id", "=", ids["vehicle"])]).unlink()
+            env["fleetflow.allocation"].search([("vehicle_id", "=", ids["vehicle"])]).unlink()
+            env["fleetflow.credential"].search([
+                "|", ("vehicle_id", "=", ids["vehicle"]), ("driver_id", "=", ids["driver"])]).unlink()
+            env["fleet.vehicle"].browse(ids["vehicle"]).unlink()
+            env["fleetflow.driver"].browse(ids["driver"]).unlink()
+            env["res.users"].browse([ids["dispatcher"], ids["manager"]]).unlink()
+            env["fleetflow.operating.profile"].browse(ids["profile"]).unlink()
+            cr.commit()
+
     def test_revoked_predecessor_serialization_then_clean_retry(self):
         """Deterministic ordering that forces the serialization path: the loser pins
         its snapshot on the still-unreplaced predecessor, the winner approves and
